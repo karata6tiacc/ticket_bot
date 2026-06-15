@@ -30,11 +30,11 @@ DELETE_COUNTDOWN_SECONDS = int(os.getenv("DELETE_COUNTDOWN_SECONDS", "5") or "5"
 AF_BLUE = 0x1E90FF
 AF_LOGO_URL = os.getenv(
     "AF_LOGO_URL",
-    "https://imgur.com/a/xgCA8n5"
+    "https://i.imgur.com/qrjrZTL.png"
 )
 AF_BANNER_URL = os.getenv(
     "AF_BANNER_URL",
-    "https://imgur.com/a/BY5cPDC"
+    "https://i.imgur.com/y2p9jlk.png"
 )
 
 if not DISCORD_TOKEN:
