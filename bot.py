@@ -282,7 +282,7 @@ def panel_embed() -> discord.Embed:
         ),
         color=AF_BLUE,
     )
-    e.set_author(name="AF SERVICES Support System", icon_url=logo_ref())
+    e.set_author(name="AF SERVICES Support System")
     e.set_thumbnail(url=logo_ref())
     e.set_image(url=banner_ref())
     e.set_footer(text="Support Team | AF SERVICES")
@@ -315,7 +315,7 @@ def ticket_embed(
         secs = first_staff_seconds % 60
         e.add_field(name="First staff response", value=f"{mins}m {secs}s", inline=False)
 
-    e.set_author(name="AF SERVICES Tickets", icon_url=logo_ref())
+    e.set_author(name="AF SERVICES Tickets")
     e.set_thumbnail(url=logo_ref())
     e.set_footer(text=footer_text or "AF SERVICES")
     return e
@@ -824,7 +824,7 @@ def make_steam_guide_embed() -> discord.Embed:
     ]
     for name, value in steps:
         e.add_field(name=name, value=value, inline=False)
-    e.set_author(name="AF SERVICES • Account Guides", icon_url=logo_ref())
+    e.set_author(name="AF SERVICES • Account Guides")
     e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Steam Guide")
     return e
@@ -852,7 +852,7 @@ def make_riot_guide_embed() -> discord.Embed:
     ]
     for name, value in steps:
         e.add_field(name=name, value=value, inline=False)
-    e.set_author(name="AF SERVICES • Account Guides", icon_url=logo_ref())
+    e.set_author(name="AF SERVICES • Account Guides")
     e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Riot Games Guide")
     return e
@@ -886,7 +886,7 @@ def make_epic_guide_embed() -> discord.Embed:
     ]
     for name, value in steps:
         e.add_field(name=name, value=value, inline=False)
-    e.set_author(name="AF SERVICES • Account Guides", icon_url=logo_ref())
+    e.set_author(name="AF SERVICES • Account Guides")
     e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Epic Games Guide")
     return e
@@ -957,7 +957,7 @@ def make_fortnite_faketicket_embed() -> discord.Embed:
         value="**Redo the ticket immediately** — resubmit after every decline.",
         inline=False,
     )
-    e.set_author(name="AF SERVICES • Account Guides", icon_url=logo_ref())
+    e.set_author(name="AF SERVICES • Account Guides")
     e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Fortnite Recovery Guide")
     return e
@@ -1056,7 +1056,7 @@ def make_card_guide_embed() -> discord.Embed:
     ]
     for name, value in steps:
         e.add_field(name=name, value=value, inline=False)
-    e.set_author(name="AF SERVICES • Payment Guide", icon_url=logo_ref())
+    e.set_author(name="AF SERVICES • Payment Guide")
     e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Card Payment Guide")
     return e
