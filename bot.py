@@ -30,11 +30,11 @@ DELETE_COUNTDOWN_SECONDS = int(os.getenv("DELETE_COUNTDOWN_SECONDS", "5") or "5"
 AF_BLUE = 0x1E90FF
 AF_LOGO_URL = os.getenv(
     "AF_LOGO_URL",
-    "https://cdn.discordapp.com/attachments/1430717412944248872/1472312239791931402/af_logo.png"
+    "https://imgur.com/a/xgCA8n5"
 )
 AF_BANNER_URL = os.getenv(
     "AF_BANNER_URL",
-    "https://cdn.discordapp.com/attachments/1430717412944248872/1472312218543456419/af_tickets.png"
+    "https://imgur.com/a/BY5cPDC"
 )
 
 if not DISCORD_TOKEN:
@@ -193,6 +193,12 @@ def get_staff_role(guild: discord.Guild) -> discord.Role | None:
 
 
 def is_staff(member: discord.Member) -> bool:
+    # Server owner and administrators always count as staff so the bot
+    # owner is never locked out, even without the explicit staff role.
+    if member.guild and member.id == member.guild.owner_id:
+        return True
+    if member.guild_permissions.administrator:
+        return True
     role = get_staff_role(member.guild)
     return (role in member.roles) if role else False
 
@@ -603,6 +609,25 @@ def staff_only():
     return app_commands.check(predicate)
 
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    # Without this handler, a failed check (e.g. staff-only) silently drops the
+    # interaction and Discord shows "Application did not respond".
+    if isinstance(error, app_commands.CheckFailure):
+        msg = "🚫 You don't have permission to use this command — staff only."
+    else:
+        msg = f"⚠️ Something went wrong while running this command:\n```{error}```"
+        print("App command error:", repr(error))
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception as e:
+        print("Failed to deliver error message:", e)
+
+
 @bot.tree.command(name="ticket_panel", description="Post the AF SERVICES ticket panel.")
 @staff_only()
 async def ticket_panel(interaction: discord.Interaction):
@@ -746,6 +771,279 @@ async def ticket_stats(interaction: discord.Interaction):
     e.add_field(name="By category", value="\n".join(lines) if lines else "No data", inline=False)
 
     await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+# ============================================================
+# GUIDE COMMAND
+# ============================================================
+GUIDE_STEAM_COLOR = 0x00ADEF
+GUIDE_RIOT_COLOR  = 0xFF4655
+GUIDE_EPIC_COLOR  = AF_BLUE
+
+DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━"
+
+
+def make_steam_guide_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="🎮  Steam — Account Security Guide",
+        description=f"Follow these steps to properly secure your Steam account.\n{DIVIDER}",
+        color=GUIDE_STEAM_COLOR,
+    )
+    steps = [
+        ("1️⃣  Change Profile Info",
+         "Update your **username**, **profile picture**, **display name**, and **country**."),
+        ("2️⃣  Link Phone Number (2FA)",
+         "Go to account settings and **link your phone number** to enable Two-Factor Authentication."),
+        ("3️⃣  Enable Steam Guard",
+         "Activate **Steam Guard Mobile Authenticator** for maximum account protection."),
+        ("4️⃣  Block All Friends",
+         "**Block every existing friend** on the account to cut off the previous owner's access."),
+        ("5️⃣  Make Profile Private",
+         "Go to **Privacy Settings** and set your profile to **Private** across all categories."),
+    ]
+    for name, value in steps:
+        e.add_field(name=name, value=value, inline=False)
+    e.set_author(name="AF SERVICES • Account Guides", icon_url=AF_LOGO_URL)
+    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_footer(text="AF SERVICES | Steam Guide")
+    return e
+
+
+def make_riot_guide_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="⚔️  Riot Games — Account Security Guide",
+        description=f"Follow these steps to properly secure a Riot Games account.\n{DIVIDER}",
+        color=GUIDE_RIOT_COLOR,
+    )
+    steps = [
+        ("1️⃣  Change Name & Username",
+         "Update both the **in-game display name** and your **Riot username** in account settings."),
+        ("2️⃣  Block All Friends",
+         "Go through your **friends list** and **block every contact**."),
+        ("3️⃣  Wait 2–3 Days",
+         "⏳ **Do not change the password yet.** Wait **2–3 days** before doing so."),
+        ("4️⃣  Add 2FA (If Needed for Ranked)",
+         "Enable **Two-Factor Authentication** if it is required to participate in ranked modes."),
+        ("5️⃣  Check Riot Support — Close Active Tickets",
+         "Visit **Riot Support** and check for **active tickets**.\n"
+         "If any are open, reply with:\n"
+         "> *\"I have dealt with the problem, you can close, I won't need it for now.\"*"),
+    ]
+    for name, value in steps:
+        e.add_field(name=name, value=value, inline=False)
+    e.set_author(name="AF SERVICES • Account Guides", icon_url=AF_LOGO_URL)
+    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_footer(text="AF SERVICES | Riot Games Guide")
+    return e
+
+
+def make_epic_guide_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="🎯  Epic Games — Account Security Guide",
+        description=f"Follow these steps to properly secure an Epic Games / Fortnite account.\n{DIVIDER}",
+        color=GUIDE_EPIC_COLOR,
+    )
+    steps = [
+        ("1️⃣  Change User ID",
+         "Update the **account display name / user ID** if the option is available in settings."),
+        ("2️⃣  Create a Fake Recovery Ticket",
+         "Submit a recovery ticket via [Epic ID Recovery](https://www.epicgames.com/id/login/recovery/help) "
+         "to lock in account recovery access."),
+        ("3️⃣  Block All Friends & Connections",
+         "**Block every friend and linked connection** on the account.\n"
+         "You can use [FishStick FN](https://t.me/fishstickfn) for assistance."),
+        ("4️⃣  Download Account PDF",
+         "Download the **PDF with your account information** from "
+         "[Account Settings](https://www.epicgames.com/id/login?redirect_uri=https%3A%2F%2Fwww.epicgames.com%2Faccount%2Fpersonal&prompt=select_account&display=guided)."),
+        ("5️⃣  Waiting Periods",
+         "⏳ Wait at least **8 days** before any event/tournament *(if different country or region)*.\n"
+         "⏳ Wait **2 weeks** before making **ANY purchases**."),
+        ("6️⃣  V-Bucks Accounts — Use All Refund Credits",
+         "💰 **USE ALL REFUND CREDITS** — earn more V-Bucks and greatly reduce the risk of a skin revert."),
+        ("7️⃣  No 2FA on Ramblers",
+         "🚫 **DO NOT add 2FA** to any ramblers!"),
+    ]
+    for name, value in steps:
+        e.add_field(name=name, value=value, inline=False)
+    e.set_author(name="AF SERVICES • Account Guides", icon_url=AF_LOGO_URL)
+    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_footer(text="AF SERVICES | Epic Games Guide")
+    return e
+
+
+@bot.tree.command(name="guide", description="View the account security guide for a game platform.")
+@app_commands.describe(game="Select the game platform")
+@app_commands.choices(game=[
+    app_commands.Choice(name="Steam", value="steam"),
+    app_commands.Choice(name="Riot Games", value="riot_game"),
+    app_commands.Choice(name="Epic Games", value="epic_games"),
+])
+async def guide_command(interaction: discord.Interaction, game: app_commands.Choice[str]):
+    if game.value == "steam":
+        embed = make_steam_guide_embed()
+    elif game.value == "riot_game":
+        embed = make_riot_guide_embed()
+    else:
+        embed = make_epic_guide_embed()
+    await interaction.response.send_message(embed=embed)
+
+
+# ============================================================
+# FORTNITE FAKE TICKET GUIDE
+# ============================================================
+def make_fortnite_faketicket_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="🎟️  Fortnite — How to Make a Recovery Ticket",
+        description=(
+            "**⚠️ There can only be 1 recovery ticket per account — be quick!**\n"
+            "Submit before the previous owner gets the chance.\n\n"
+            f"🔗 **Recovery Form:** [epicgames.com/id/login/recovery/help](https://www.epicgames.com/id/login/recovery/help)\n\n"
+            "**Before you start:**\n"
+            "🌐 Open a **VPN**\n"
+            "📧 Get a temp email at **[tempmail.ninja](https://tempmail.ninja/)**\n"
+            f"{DIVIDER}"
+        ),
+        color=0x00D4FF,
+    )
+    steps = [
+        ("1️⃣  New Email Address",
+         "Enter a **new email address** that has **no existing Epic ID** linked — "
+         "this becomes the new address for the account."),
+        ("2️⃣  Account ID",
+         "Get the **Account ID** from account settings.\n"
+         "*(PDF access is **not** required for this step.)*"),
+        ("3️⃣  Current Email on the Account",
+         "Enter the **current email address** linked to the account *(the one you already have access to)*."),
+        ("4️⃣  Display Name",
+         "Enter the **display name** exactly as shown in account settings."),
+        ("5️⃣  Personal Details",
+         "• **Name:** Guess using **first and last letters** — *accuracy not required, just be fast*\n"
+         "• **Country:** Shown in account settings\n"
+         "• **City:** Any guess works *(doesn't need to be accurate)*"),
+        ("6️⃣  Connected Accounts",
+         "Select that you **haven't connected any accounts**. *(Skip this question)*"),
+        ("7️⃣  Payment Methods",
+         "Select that you **haven't used a card**. *(Skip this question)*"),
+        ("8️⃣  Support Message",
+         "Use the following message:\n"
+         "> *\"Hello, I recently moved to [your country] and saw that I no longer have access to my email. "
+         "I am making this request so I can regain access.\"*"),
+    ]
+    for name, value in steps:
+        e.add_field(name=name, value=value, inline=False)
+    e.add_field(
+        name="🔄  Ticket Declined?",
+        value="**Redo the ticket immediately** — resubmit after every decline.",
+        inline=False,
+    )
+    e.set_author(name="AF SERVICES • Account Guides", icon_url=AF_LOGO_URL)
+    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_footer(text="AF SERVICES | Fortnite Recovery Guide")
+    return e
+
+
+@bot.tree.command(name="fortnite_faketicketguide", description="How to make a recovery ticket for a Fortnite account.")
+async def fortnite_faketicketguide_command(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=make_fortnite_faketicket_embed())
+
+
+# ============================================================
+# CARD PAYMENT GUIDE
+# ============================================================
+class PaidProofModal(discord.ui.Modal, title="Submit Payment Proof"):
+    screenshot = discord.ui.TextInput(
+        label="Payment Page Screenshot URL",
+        style=discord.TextStyle.short,
+        required=True,
+        placeholder="https://i.imgur.com/... or any image URL",
+        max_length=500,
+    )
+    email_proof = discord.ui.TextInput(
+        label="Email Confirmation Screenshot URL",
+        style=discord.TextStyle.short,
+        required=False,
+        placeholder="https://i.imgur.com/... (optional but recommended)",
+        max_length=500,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Submit this inside the server.", ephemeral=True)
+            return
+
+        log_ch = await get_log_channel(interaction.guild)
+
+        e = discord.Embed(
+            title="💳  Payment Proof Received",
+            color=0x2ECC71,
+        )
+        e.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)
+        e.add_field(
+            name="Submitted by",
+            value=f"{interaction.user.mention} (`{interaction.user.id}`)",
+            inline=False,
+        )
+        e.add_field(name="📸  Payment Screenshot", value=self.screenshot.value, inline=False)
+        if self.email_proof.value:
+            e.add_field(name="📧  Email Confirmation", value=self.email_proof.value, inline=False)
+        e.set_footer(text=f"AF SERVICES | {utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+
+        if log_ch:
+            await log_ch.send(embed=e)
+
+        await interaction.response.send_message(
+            "✅ **Payment proof submitted!** A staff member will review it shortly.",
+            ephemeral=True,
+        )
+
+
+class CardView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Paid",
+        style=discord.ButtonStyle.success,
+        custom_id="af_card_paid",
+        emoji="✅",
+    )
+    async def paid_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PaidProofModal())
+
+
+def make_card_guide_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="💳  How to Purchase Using Card",
+        description=f"Follow the steps below to complete your purchase.\n{DIVIDER}",
+        color=0x2ECC71,
+    )
+    steps = [
+        ("1️⃣  Visit the Store",
+         "Head over to **[accsforge.fun](https://www.accsforge.fun/)**."),
+        ("2️⃣  Select the 1€ Option",
+         "Choose the **1 EURO** option — it is the first product listed."),
+        ("3️⃣  Set the Quantity",
+         "Set the quantity to the **price of your product**, then add **20% on top** to cover taxes.\n"
+         "*(Example: product costs €10 → set quantity to **12**)*"),
+        ("4️⃣  Add to Cart & Checkout",
+         "Add the product to your cart, click the **cart icon**, and proceed through to payment."),
+        ("5️⃣  Save Your Payment Proof",
+         "📸 Take a screenshot of:\n"
+         "• The **payment confirmation page**\n"
+         "• The **email confirmation** received after payment\n\n"
+         "Upload both to an image host *(e.g. Imgur)* and click **✅ Paid** below to submit."),
+    ]
+    for name, value in steps:
+        e.add_field(name=name, value=value, inline=False)
+    e.set_author(name="AF SERVICES • Payment Guide", icon_url=AF_LOGO_URL)
+    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_footer(text="AF SERVICES | Card Payment Guide")
+    return e
+
+
+@bot.tree.command(name="card", description="How to purchase using a card payment method.")
+async def card_command(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=make_card_guide_embed(), view=CardView())
 
 
 # ============================================================
@@ -955,6 +1253,7 @@ async def on_ready():
         print("Command sync error:", e)
 
     bot.add_view(TicketPanelView())
+    bot.add_view(CardView())
 
     rows = await db_fetch(
         "SELECT channel_id, control_message_id FROM tickets WHERE guild_id=$1 AND status='open' AND control_message_id IS NOT NULL",
