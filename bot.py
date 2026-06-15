@@ -36,6 +36,13 @@ AF_BLUE = 0x1E90FF
 LOGO_FILENAME = "af_logo_black.png"
 BANNER_FILENAME = "af_tickets.png"
 
+# Resolve asset paths absolutely (relative to this file), so the files are found
+# regardless of the process working directory — which often differs from the
+# project folder on hosts / worker processes.
+ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGO_PATH = os.path.join(ASSET_DIR, LOGO_FILENAME)
+BANNER_PATH = os.path.join(ASSET_DIR, BANNER_FILENAME)
+
 AF_LOGO_URL = os.getenv("AF_LOGO_URL", "")     # optional direct-URL override
 AF_BANNER_URL = os.getenv("AF_BANNER_URL", "")  # optional direct-URL override
 
@@ -52,10 +59,10 @@ def embed_files(include_banner: bool = False) -> list[discord.File]:
     """Fresh File objects to attach alongside an embed. Single-use, so build new
     ones for every send. Skipped when an env URL override is set or file missing."""
     files: list[discord.File] = []
-    if not AF_LOGO_URL and os.path.exists(LOGO_FILENAME):
-        files.append(discord.File(LOGO_FILENAME, filename=LOGO_FILENAME))
-    if include_banner and not AF_BANNER_URL and os.path.exists(BANNER_FILENAME):
-        files.append(discord.File(BANNER_FILENAME, filename=BANNER_FILENAME))
+    if not AF_LOGO_URL and os.path.exists(LOGO_PATH):
+        files.append(discord.File(LOGO_PATH, filename=LOGO_FILENAME))
+    if include_banner and not AF_BANNER_URL and os.path.exists(BANNER_PATH):
+        files.append(discord.File(BANNER_PATH, filename=BANNER_FILENAME))
     return files
 
 if not DISCORD_TOKEN:
@@ -1290,6 +1297,11 @@ async def on_ready():
         status_rotator.start()
 
     print(f"✅ Ticket bot online as {bot.user}")
+    print(f"🖼️  Asset dir: {ASSET_DIR}")
+    print(f"🖼️  Logo found:   {os.path.exists(LOGO_PATH)}  ({LOGO_PATH})")
+    print(f"🖼️  Banner found: {os.path.exists(BANNER_PATH)}  ({BANNER_PATH})")
+    if AF_LOGO_URL or AF_BANNER_URL:
+        print(f"🖼️  URL overrides -> logo:{AF_LOGO_URL or '(none)'} banner:{AF_BANNER_URL or '(none)'}")
 
 
 bot.run(DISCORD_TOKEN)
