@@ -28,14 +28,35 @@ STATUS_ROTATE_SECONDS = int(os.getenv("STATUS_ROTATE_SECONDS", "15") or "15")
 DELETE_COUNTDOWN_SECONDS = int(os.getenv("DELETE_COUNTDOWN_SECONDS", "5") or "5")
 
 AF_BLUE = 0x1E90FF
-AF_LOGO_URL = os.getenv(
-    "AF_LOGO_URL",
-    "https://i.imgur.com/qrjrZTL.png"
-)
-AF_BANNER_URL = os.getenv(
-    "AF_BANNER_URL",
-    "https://i.imgur.com/y2p9jlk.png"
-)
+
+# Image assets are bundled with the bot and attached to each message so Discord
+# hosts them itself. External links (Imgur, etc.) often refuse to embed in
+# Discord, so we ship the PNGs next to bot.py and reference them via
+# attachment://. A direct image URL can still override each via env var.
+LOGO_FILENAME = "af_logo_black.png"
+BANNER_FILENAME = "af_tickets.png"
+
+AF_LOGO_URL = os.getenv("AF_LOGO_URL", "")     # optional direct-URL override
+AF_BANNER_URL = os.getenv("AF_BANNER_URL", "")  # optional direct-URL override
+
+
+def logo_ref() -> str:
+    return AF_LOGO_URL or f"attachment://{LOGO_FILENAME}"
+
+
+def banner_ref() -> str:
+    return AF_BANNER_URL or f"attachment://{BANNER_FILENAME}"
+
+
+def embed_files(include_banner: bool = False) -> list[discord.File]:
+    """Fresh File objects to attach alongside an embed. Single-use, so build new
+    ones for every send. Skipped when an env URL override is set or file missing."""
+    files: list[discord.File] = []
+    if not AF_LOGO_URL and os.path.exists(LOGO_FILENAME):
+        files.append(discord.File(LOGO_FILENAME, filename=LOGO_FILENAME))
+    if include_banner and not AF_BANNER_URL and os.path.exists(BANNER_FILENAME):
+        files.append(discord.File(BANNER_FILENAME, filename=BANNER_FILENAME))
+    return files
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Missing DISCORD_TOKEN")
@@ -261,9 +282,9 @@ def panel_embed() -> discord.Embed:
         ),
         color=AF_BLUE,
     )
-    e.set_author(name="AF SERVICES Support System", icon_url=AF_LOGO_URL)
-    e.set_thumbnail(url=AF_LOGO_URL)
-    e.set_image(url=AF_BANNER_URL)
+    e.set_author(name="AF SERVICES Support System", icon_url=logo_ref())
+    e.set_thumbnail(url=logo_ref())
+    e.set_image(url=banner_ref())
     e.set_footer(text="Support Team | AF SERVICES")
     return e
 
@@ -294,8 +315,8 @@ def ticket_embed(
         secs = first_staff_seconds % 60
         e.add_field(name="First staff response", value=f"{mins}m {secs}s", inline=False)
 
-    e.set_author(name="AF SERVICES Tickets", icon_url=AF_LOGO_URL)
-    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_author(name="AF SERVICES Tickets", icon_url=logo_ref())
+    e.set_thumbnail(url=logo_ref())
     e.set_footer(text=footer_text or "AF SERVICES")
     return e
 
@@ -580,7 +601,7 @@ class TicketPanelSelect(discord.ui.Select):
             first_staff_seconds=None,
             footer_text="AF SERVICES • Status: Waiting for staff"
         )
-        msg = await channel.send(content=user.mention, embed=embed, view=TicketControlView(channel.id))
+        msg = await channel.send(content=user.mention, embed=embed, view=TicketControlView(channel.id), files=embed_files())
 
         await db_execute(
             "UPDATE tickets SET control_message_id=$1 WHERE channel_id=$2",
@@ -631,7 +652,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 @bot.tree.command(name="ticket_panel", description="Post the AF SERVICES ticket panel.")
 @staff_only()
 async def ticket_panel(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=panel_embed(), view=TicketPanelView())
+    await interaction.response.send_message(embed=panel_embed(), view=TicketPanelView(), files=embed_files(include_banner=True))
 
 
 @bot.tree.command(name="close", description="Close the current ticket.")
@@ -758,7 +779,7 @@ async def ticket_stats(interaction: discord.Interaction):
     avg_text = "N/A" if avg_seconds is None else f"{int(avg_seconds) // 60}m {int(avg_seconds) % 60}s"
 
     e = discord.Embed(title="AF SERVICES • Ticket Stats", color=AF_BLUE)
-    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_thumbnail(url=logo_ref())
     e.add_field(name="Total tickets", value=str(totals["total"]), inline=True)
     e.add_field(name="Open", value=str(totals["open"] or 0), inline=True)
     e.add_field(name="Closed", value=str(totals["closed"] or 0), inline=True)
@@ -770,7 +791,7 @@ async def ticket_stats(interaction: discord.Interaction):
         lines.append(f"**{kind_label(r['kind'])}**: total {r['total']}, open {r['open'] or 0}")
     e.add_field(name="By category", value="\n".join(lines) if lines else "No data", inline=False)
 
-    await interaction.response.send_message(embed=e, ephemeral=True)
+    await interaction.response.send_message(embed=e, ephemeral=True, files=embed_files())
 
 
 # ============================================================
@@ -803,8 +824,8 @@ def make_steam_guide_embed() -> discord.Embed:
     ]
     for name, value in steps:
         e.add_field(name=name, value=value, inline=False)
-    e.set_author(name="AF SERVICES • Account Guides", icon_url=AF_LOGO_URL)
-    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_author(name="AF SERVICES • Account Guides", icon_url=logo_ref())
+    e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Steam Guide")
     return e
 
@@ -831,8 +852,8 @@ def make_riot_guide_embed() -> discord.Embed:
     ]
     for name, value in steps:
         e.add_field(name=name, value=value, inline=False)
-    e.set_author(name="AF SERVICES • Account Guides", icon_url=AF_LOGO_URL)
-    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_author(name="AF SERVICES • Account Guides", icon_url=logo_ref())
+    e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Riot Games Guide")
     return e
 
@@ -865,8 +886,8 @@ def make_epic_guide_embed() -> discord.Embed:
     ]
     for name, value in steps:
         e.add_field(name=name, value=value, inline=False)
-    e.set_author(name="AF SERVICES • Account Guides", icon_url=AF_LOGO_URL)
-    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_author(name="AF SERVICES • Account Guides", icon_url=logo_ref())
+    e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Epic Games Guide")
     return e
 
@@ -885,7 +906,7 @@ async def guide_command(interaction: discord.Interaction, game: app_commands.Cho
         embed = make_riot_guide_embed()
     else:
         embed = make_epic_guide_embed()
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, files=embed_files())
 
 
 # ============================================================
@@ -936,15 +957,15 @@ def make_fortnite_faketicket_embed() -> discord.Embed:
         value="**Redo the ticket immediately** — resubmit after every decline.",
         inline=False,
     )
-    e.set_author(name="AF SERVICES • Account Guides", icon_url=AF_LOGO_URL)
-    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_author(name="AF SERVICES • Account Guides", icon_url=logo_ref())
+    e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Fortnite Recovery Guide")
     return e
 
 
 @bot.tree.command(name="fortnite_faketicketguide", description="How to make a recovery ticket for a Fortnite account.")
 async def fortnite_faketicketguide_command(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=make_fortnite_faketicket_embed())
+    await interaction.response.send_message(embed=make_fortnite_faketicket_embed(), files=embed_files())
 
 
 # ============================================================
@@ -1035,15 +1056,15 @@ def make_card_guide_embed() -> discord.Embed:
     ]
     for name, value in steps:
         e.add_field(name=name, value=value, inline=False)
-    e.set_author(name="AF SERVICES • Payment Guide", icon_url=AF_LOGO_URL)
-    e.set_thumbnail(url=AF_LOGO_URL)
+    e.set_author(name="AF SERVICES • Payment Guide", icon_url=logo_ref())
+    e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Card Payment Guide")
     return e
 
 
 @bot.tree.command(name="card", description="How to purchase using a card payment method.")
 async def card_command(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=make_card_guide_embed(), view=CardView())
+    await interaction.response.send_message(embed=make_card_guide_embed(), view=CardView(), files=embed_files())
 
 
 # ============================================================
