@@ -1,2 +1,5 @@
 discord.py
 asyncpg
+aiohttp
+anthropic
+python-dotenv
