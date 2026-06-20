@@ -88,6 +88,19 @@ LZT_USER_ID = os.getenv("LZT_USER_ID", "")  # your numeric lzt.market user id (f
 LZT_API_BASE = os.getenv("LZT_API_BASE", "https://api.lzt.market").rstrip("/")
 LZT_ENABLED = bool(LZT_API_TOKEN)
 
+# Customer-facing category name -> LZT.market category_id (verified against the live API).
+# Valorant accounts live under the "riot" category (13).
+LZT_CATEGORY_IDS = {
+    "fortnite": 9,
+    "valorant": 13,
+    "riot": 13,
+    "steam": 1,
+    "socialclub": 7,
+    "llm": 6,
+}
+# Owned-account tag titles on LZT.market that mean "do NOT deliver this".
+LZT_BAD_TAGS = {"invalid", "resold"}
+
 # --- Delivery policy ---
 # You chose "AI gathers + staff approves": payment is verified automatically but a
 # human clicks Approve before any account leaves stock. Set AUTO_DELIVER=1 to skip
@@ -321,10 +334,11 @@ def _lzt_headers() -> dict:
     }
 
 
-async def lzt_list_owned(page: int = 1) -> dict:
+async def lzt_list_owned(page: int = 1, category_id: int | None = None) -> dict:
     """List accounts you've purchased on LZT.market (your sellable stock).
-    Returns {ok, items: [{item_id, title, price, item_state}], total, error}."""
-    out = {"ok": False, "items": [], "total": None, "error": None}
+    Pass category_id to filter server-side (e.g. 9=Fortnite, 13=Riot/Valorant).
+    Returns {ok, items: [{item_id, title, price, item_state, category, tags}], total, has_next, error}."""
+    out = {"ok": False, "items": [], "total": None, "has_next": False, "error": None}
     if not LZT_ENABLED:
         out["error"] = "LZT not configured"
         return out
@@ -333,9 +347,12 @@ async def lzt_list_owned(page: int = 1) -> dict:
         return out
 
     url = f"{LZT_API_BASE}/user/{LZT_USER_ID}/orders"
+    params: dict = {"page": page}
+    if category_id is not None:
+        params["category_id"] = category_id
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
-            async with session.get(url, headers=_lzt_headers(), params={"page": page}) as resp:
+            async with session.get(url, headers=_lzt_headers(), params=params) as resp:
                 text = await resp.text()
                 if resp.status >= 400:
                     out["error"] = f"HTTP {resp.status}: {text[:200]}"
@@ -354,11 +371,48 @@ async def lzt_list_owned(page: int = 1) -> dict:
                 "title": it.get("title") or it.get("title_en") or "Account",
                 "price": it.get("price"),
                 "item_state": it.get("item_state") or it.get("status"),
+                "category": (it.get("category") or {}).get("category_name"),
+                "tags": [t.get("title") for t in (it.get("tags") or {}).values() if isinstance(t, dict)],
             }
             for it in items if isinstance(it, dict)
         ],
         total=data.get("totalItems"),
+        has_next=bool(data.get("hasNextPage")),
     )
+    return out
+
+
+def _item_is_valid(item: dict) -> bool:
+    """True when an owned item has no 'invalid'/'resold' tag — i.e. safe to deliver."""
+    tags = {str(t).lower() for t in (item.get("tags") or [])}
+    return not (tags & LZT_BAD_TAGS)
+
+
+async def _delivered_item_ids() -> set[int]:
+    """LZT item IDs already delivered to a customer (never hand the same account out twice)."""
+    rows = await db_fetch("SELECT lzt_item_id FROM deliveries WHERE lzt_item_id IS NOT NULL")
+    return {int(r["lzt_item_id"]) for r in rows if r["lzt_item_id"]}
+
+
+async def lzt_find_valid(category: str, max_pages: int = 10) -> dict:
+    """Walk your purchases for one category, keeping only VALID accounts
+    (excludes the 'invalid' and 'resold' tags). `category` is a name like
+    'fortnite' or 'valorant'. Returns {ok, items, error}."""
+    out = {"ok": False, "items": [], "error": None}
+    cid = LZT_CATEGORY_IDS.get(category.lower())
+    if cid is None:
+        out["error"] = f"unknown category '{category}'"
+        return out
+    valid: list[dict] = []
+    for pg in range(1, max_pages + 1):
+        res = await lzt_list_owned(page=pg, category_id=cid)
+        if not res["ok"]:
+            out["error"] = res["error"]
+            return out
+        valid.extend(it for it in res["items"] if _item_is_valid(it))
+        if not res.get("has_next"):
+            break
+    out.update(ok=True, items=valid)
     return out
 
 
@@ -1150,6 +1204,95 @@ async def lzt_stock_command(interaction: discord.Interaction, page: int = 1):
     total = f" • total {res['total']}" if res.get("total") is not None else ""
     e.set_footer(text=f"AF SERVICES • Page {max(1, page)}{total} • Use the item ID with /deliver")
     await interaction.followup.send(embed=e, ephemeral=True)
+
+
+LZT_CATEGORY_CHOICES = [
+    app_commands.Choice(name="Fortnite", value="fortnite"),
+    app_commands.Choice(name="Valorant", value="valorant"),
+    app_commands.Choice(name="Steam", value="steam"),
+    app_commands.Choice(name="Social Club", value="socialclub"),
+]
+
+
+@bot.tree.command(name="find_account", description="List VALID accounts you own in a category (excludes Invalid & Resold).")
+@staff_only()
+@app_commands.describe(category="Game category the customer wants")
+@app_commands.choices(category=LZT_CATEGORY_CHOICES)
+async def find_account_command(interaction: discord.Interaction, category: app_commands.Choice[str]):
+    await interaction.response.defer(ephemeral=True)
+    res = await lzt_find_valid(category.value)
+    if not res["ok"]:
+        await interaction.followup.send(f"⚠️ LZT.market error: `{res['error']}`", ephemeral=True)
+        return
+
+    used = await _delivered_item_ids()
+    items = [it for it in res["items"]
+             if int(re.sub(r"[^0-9]", "", str(it["item_id"])) or 0) not in used]
+    if not items:
+        await interaction.followup.send(
+            f"No **valid** {category.name} accounts available in your purchases "
+            f"(all are tagged Invalid/Resold or already delivered).", ephemeral=True)
+        return
+
+    lines = []
+    for it in items[:25]:
+        price = f" • {it['price']}" if it.get("price") is not None else ""
+        lines.append(f"`{it['item_id']}` — {str(it['title'])[:60]}{price}")
+    e = discord.Embed(
+        title=f"✅  Valid {category.name} Stock",
+        description="\n".join(lines),
+        color=0x2ECC71,
+    )
+    e.set_footer(text=f"AF SERVICES • {len(items)} valid • excludes Invalid/Resold/already-delivered "
+                      f"• deliver with /deliver_next or /deliver")
+    await interaction.followup.send(embed=e, ephemeral=True)
+
+
+@bot.tree.command(name="deliver_next",
+                  description="Auto-pick the next VALID account in a category and deliver it into this ticket.")
+@staff_only()
+@app_commands.describe(category="Game category the customer wants")
+@app_commands.choices(category=LZT_CATEGORY_CHOICES)
+async def deliver_next_command(interaction: discord.Interaction, category: app_commands.Choice[str]):
+    if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("Use this in a ticket channel.", ephemeral=True)
+        return
+    row = await db_fetchrow(
+        "SELECT owner_id, verified_order_id, verified_product FROM tickets WHERE channel_id=$1",
+        interaction.channel.id,
+    )
+    if not row:
+        await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    res = await lzt_find_valid(category.value)
+    if not res["ok"]:
+        await interaction.followup.send(f"⚠️ LZT.market error: `{res['error']}`", ephemeral=True)
+        return
+
+    used = await _delivered_item_ids()
+    candidates = [it for it in res["items"]
+                  if int(re.sub(r"[^0-9]", "", str(it["item_id"])) or 0) not in used]
+    if not candidates:
+        await interaction.followup.send(
+            f"❌ No **valid** {category.name} accounts left to deliver "
+            f"(all tagged Invalid/Resold or already delivered).", ephemeral=True)
+        return
+
+    pick = candidates[0]
+    owner = interaction.guild.get_member(int(row["owner_id"])) or await bot.fetch_user(int(row["owner_id"]))
+    await interaction.followup.send(
+        f"📦 Delivering valid {category.name} account `{pick['item_id']}` — "
+        f"{str(pick['title'])[:60]}...", ephemeral=True)
+    await deliver_account(
+        channel=interaction.channel,
+        owner=owner,
+        lzt_item_id=pick["item_id"],
+        product=row["verified_product"] or category.name,
+        order_id=row["verified_order_id"],
+        delivered_by=interaction.user.id,
+    )
 
 
 @bot.tree.command(name="verify_order", description="Check a SellAuth order/invoice and its payment status.")
