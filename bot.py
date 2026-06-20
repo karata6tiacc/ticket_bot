@@ -352,7 +352,7 @@ async def lzt_list_owned(page: int = 1, category_id: int | None = None) -> dict:
     Returns {ok, items: [{item_id, title, price, item_state, category, tags}], total, has_next, error}."""
     out = {"ok": False, "items": [], "total": None, "has_next": False, "error": None}
     if not LZT_ENABLED:
-        out["error"] = "LZT not configured"
+        out["error"] = "stock source not configured"
         return out
     if not LZT_USER_ID:
         out["error"] = "LZT_USER_ID not set (your numeric lzt.market user id)"
@@ -438,7 +438,7 @@ async def _lzt_get(path: str, params: dict | None = None) -> dict:
     """Raw authenticated GET against the LZT.market API. Returns {ok, data, error}."""
     out = {"ok": False, "data": None, "error": None}
     if not LZT_ENABLED:
-        out["error"] = "LZT not configured"
+        out["error"] = "stock source not configured"
         return out
     url = f"{LZT_API_BASE}{path}"
     try:
@@ -509,11 +509,10 @@ _FN_RARITY = {
 }
 
 
-def market_account_embed(category: str, item: dict) -> discord.Embed:
-    """Customer-facing embed describing one listing: stats + skins image + resale price."""
+def market_account_embed(category: str, item: dict, image_name: str | None = None) -> discord.Embed:
+    """Customer-facing embed describing one account: stats + skins image + price.
+    Never exposes the sourcing marketplace. `image_name` is an attachment:// filename."""
     src, resale = _resale_price(item)
-    iid = item.get("item_id") or item.get("id")
-    listing = f"{LZT_SITE}/{iid}/"
 
     if category.lower() == "valorant":
         skins = item.get("riot_valorant_skin_count") or 0
@@ -528,14 +527,12 @@ def market_account_embed(category: str, item: dict) -> discord.Embed:
             title=f"🔫  Valorant Account — {skins} Skins",
             description=f"**Rank:** {rank}  •  **Level:** {level}  •  **Region:** {region}",
             color=GUIDE_RIOT_COLOR,
-            url=listing,
         )
         e.add_field(name="🎨 Skins", value=str(skins), inline=True)
         e.add_field(name="💎 Skin Value", value=f"{vp_inv:,} VP", inline=True)
         e.add_field(name="🪙 VP Balance", value=f"{vp_wallet:,} VP", inline=True)
         e.add_field(name="🧍 Agents", value=str(agents), inline=True)
         e.add_field(name="🔪 Knives", value=str(knives), inline=True)
-        img = _preview_image(item, "weapons")
     else:  # fortnite
         skins = item.get("fortnite_skin_count") or 0
         vbucks = item.get("fortnite_balance") or 0
@@ -554,17 +551,38 @@ def market_account_embed(category: str, item: dict) -> discord.Embed:
             title=f"🎮  Fortnite Account — {skins} Skins",
             description=f"**V-Bucks:** {vbucks:,}  •  **V-Bucks spent in shop:** {spent:,}",
             color=GUIDE_EPIC_COLOR,
-            url=listing,
         )
         e.add_field(name="🎨 Skins", value=skin_list[:1024], inline=False)
-        img = _preview_image(item, "skins")
 
     e.add_field(name="💶 Price", value=f"**€{resale:.0f}**", inline=True)
-    e.add_field(name="🔗 Listing", value=f"[View on market]({listing})", inline=True)
-    if img:
-        e.set_image(url=img)
+    if image_name:
+        e.set_image(url=f"attachment://{image_name}")
     e.set_footer(text="AF SERVICES • Prices include warranty & setup support")
     return e
+
+
+async def _fetch_bytes(url: str) -> bytes | None:
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
+            async with s.get(url) as r:
+                return await r.read() if r.status == 200 else None
+    except Exception:
+        return None
+
+
+async def build_account_message(category: str, item: dict, idx: int = 0):
+    """(embed, file|None) for one account. The skin preview is re-hosted through Discord
+    so the customer never sees the source marketplace URL."""
+    kind = "weapons" if category.lower() == "valorant" else "skins"
+    url = _preview_image(item, kind)
+    file = None
+    image_name = None
+    if url:
+        data = await _fetch_bytes(url)
+        if data:
+            image_name = f"account_{idx}.png"
+            file = discord.File(io.BytesIO(data), filename=image_name)
+    return market_account_embed(category, item, image_name=image_name), file
 
 
 async def notify_restock(triggered_by: discord.abc.User | None, guild: discord.Guild,
@@ -583,7 +601,7 @@ async def notify_restock(triggered_by: discord.abc.User | None, guild: discord.G
         color=0xE74C3C,
         url=listing,
     )
-    e.add_field(name="💸 Your cost (LZT)", value=f"€{src:.2f}", inline=True)
+    e.add_field(name="💸 Your cost", value=f"€{src:.2f}", inline=True)
     e.add_field(name="💶 Sold for", value=f"€{resale:.0f}", inline=True)
     e.add_field(name="🆔 Item ID", value=f"`{iid}`", inline=True)
     e.add_field(name="🔗 Buy now", value=f"[Open listing]({listing})", inline=False)
@@ -609,7 +627,7 @@ async def lzt_get_credentials(item_id: str | int) -> dict:
     Returns {ok, login, password, raw, title, error}."""
     out = {"ok": False, "login": None, "password": None, "raw": None, "title": None, "error": None}
     if not LZT_ENABLED:
-        out["error"] = "LZT not configured"
+        out["error"] = "stock source not configured"
         return out
 
     iid = re.sub(r"[^0-9]", "", str(item_id or "").strip())
@@ -692,7 +710,7 @@ async def deliver_account(
 
     creds = await lzt_get_credentials(lzt_item_id)
     if not creds["ok"]:
-        await channel.send(f"⚠️ Couldn't pull that account from LZT.market: `{creds['error']}`")
+        await channel.send(f"⚠️ Couldn't load that account from stock: `{creds['error']}`")
         return False
 
     # Record first (unique index on order_id makes a double-deliver fail loudly).
@@ -722,7 +740,7 @@ async def deliver_account(
         le = discord.Embed(title="✅ Account Delivered", color=0x2ECC71)
         le.add_field(name="Buyer", value=f"{owner.mention} (`{owner.id}`)", inline=False)
         le.add_field(name="Product", value=product or creds.get("title") or "—", inline=True)
-        le.add_field(name="LZT item", value=str(lzt_item_id), inline=True)
+        le.add_field(name="Item", value=str(lzt_item_id), inline=True)
         le.add_field(name="Order", value=f"`{order_id}`" if order_id else "—", inline=True)
         if delivered_by:
             le.add_field(name="Released by", value=f"<@{delivered_by}>", inline=False)
@@ -1375,14 +1393,14 @@ async def ticket_stats(interaction: discord.Interaction):
 # ============================================================
 # STOCK / DELIVERY / VERIFICATION COMMANDS
 # ============================================================
-@bot.tree.command(name="stock", description="List the accounts you own on LZT.market (your stock).")
+@bot.tree.command(name="stock", description="List the accounts in your stock.")
 @staff_only()
 @app_commands.describe(page="Page number (default 1)")
 async def lzt_stock_command(interaction: discord.Interaction, page: int = 1):
     await interaction.response.defer(ephemeral=True)
     res = await lzt_list_owned(page=max(1, page))
     if not res["ok"]:
-        await interaction.followup.send(f"⚠️ LZT.market error: `{res['error']}`", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Stock error: `{res['error']}`", ephemeral=True)
         return
     if not res["items"]:
         await interaction.followup.send("No owned accounts found on this page.", ephemeral=True)
@@ -1395,7 +1413,7 @@ async def lzt_stock_command(interaction: discord.Interaction, page: int = 1):
         lines.append(f"`{it['item_id']}` — {str(it['title'])[:60]}{price}{state}")
 
     e = discord.Embed(
-        title="📦  LZT.market Stock",
+        title="📦  Your Stock",
         description="\n".join(lines),
         color=AF_BLUE,
     )
@@ -1420,7 +1438,7 @@ async def find_account_command(interaction: discord.Interaction, category: app_c
     await interaction.response.defer(ephemeral=True)
     res = await lzt_find_valid(category.value)
     if not res["ok"]:
-        await interaction.followup.send(f"⚠️ LZT.market error: `{res['error']}`", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Stock error: `{res['error']}`", ephemeral=True)
         return
 
     used = await _delivered_item_ids()
@@ -1466,7 +1484,7 @@ async def deliver_next_command(interaction: discord.Interaction, category: app_c
     await interaction.response.defer(ephemeral=True)
     res = await lzt_find_valid(category.value)
     if not res["ok"]:
-        await interaction.followup.send(f"⚠️ LZT.market error: `{res['error']}`", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Stock error: `{res['error']}`", ephemeral=True)
         return
 
     used = await _delivered_item_ids()
@@ -1512,7 +1530,7 @@ async def market_command(interaction: discord.Interaction, category: app_command
     await interaction.response.defer()
     res = await lzt_search_market(category.value, budget=budget, count=count)
     if not res["ok"]:
-        await interaction.followup.send(f"⚠️ LZT.market error: `{res['error']}`", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Stock error: `{res['error']}`", ephemeral=True)
         return
     if not res["items"]:
         await interaction.followup.send(
@@ -1520,41 +1538,45 @@ async def market_command(interaction: discord.Interaction, category: app_command
             + (f" under €{budget:.0f}." if budget else "."), ephemeral=True)
         return
 
-    embeds = []
-    for it in res["items"]:
+    embeds, files = [], []
+    for i, it in enumerate(res["items"]):
         det = await lzt_item_detail(it.get("item_id") or it.get("id"))
-        embeds.append(market_account_embed(category.value, det["item"] if det["ok"] else it))
+        embed, file = await build_account_message(category.value, det["item"] if det["ok"] else it, i)
+        embeds.append(embed)
+        if file:
+            files.append(file)
 
     header = f"🛍️ **{category.name} accounts available**"
     if budget:
         header += f" — within a **€{budget:.0f}** budget"
-    await interaction.followup.send(content=header, embeds=embeds[:10])
+    await interaction.followup.send(content=header, embeds=embeds[:10], files=files)
 
 
 @bot.tree.command(name="account_info",
-                  description="Show full details (skins, value, price) for one market listing.")
-@app_commands.describe(item_id="LZT.market listing/item ID")
+                  description="Show full details (skins, value, price) for one account.")
+@app_commands.describe(item_id="Account listing/item ID")
 async def account_info_command(interaction: discord.Interaction, item_id: str):
     await interaction.response.defer()
     det = await lzt_item_detail(item_id)
     if not det["ok"]:
-        await interaction.followup.send(f"⚠️ LZT.market error: `{det['error']}`", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Stock error: `{det['error']}`", ephemeral=True)
         return
     item = det["item"] or {}
     cid = (item.get("category") or {}).get("category_id") or item.get("category_id")
     category = "valorant" if cid == 13 else "fortnite" if cid == 9 else None
     if category is None:
         await interaction.followup.send(
-            "ℹ️ That listing isn't a Valorant or Fortnite account, so I can't render its stats.",
+            "ℹ️ That account isn't a Valorant or Fortnite account, so I can't render its stats.",
             ephemeral=True)
         return
-    await interaction.followup.send(embed=market_account_embed(category, item))
+    embed, file = await build_account_message(category, item, 0)
+    await interaction.followup.send(embed=embed, files=[file] if file else [])
 
 
 @bot.tree.command(name="reserve",
-                  description="Reserve a market account for this ticket — auto-alerts you to buy it once paid.")
+                  description="Reserve an account for this ticket — auto-alerts you to buy it once paid.")
 @staff_only()
-@app_commands.describe(item_id="The LZT.market listing the customer chose")
+@app_commands.describe(item_id="The account listing the customer chose")
 async def reserve_command(interaction: discord.Interaction, item_id: str):
     if not isinstance(interaction.channel, discord.TextChannel):
         await interaction.response.send_message("Use this in a ticket channel.", ephemeral=True)
@@ -1566,7 +1588,7 @@ async def reserve_command(interaction: discord.Interaction, item_id: str):
     await interaction.response.defer(ephemeral=True)
     det = await lzt_item_detail(item_id)
     if not det["ok"]:
-        await interaction.followup.send(f"⚠️ LZT.market error: `{det['error']}`", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Stock error: `{det['error']}`", ephemeral=True)
         return
     item = det["item"] or {}
     iid = int(re.sub(r"[^0-9]", "", str(item.get("item_id") or item_id)) or 0)
@@ -1584,9 +1606,9 @@ async def reserve_command(interaction: discord.Interaction, item_id: str):
 
 
 @bot.tree.command(name="restock",
-                  description="Alert yourself to re-buy a sold account on LZT.market ASAP.")
+                  description="Alert yourself to re-buy a sold account ASAP.")
 @staff_only()
-@app_commands.describe(item_id="The LZT.market item ID the customer bought")
+@app_commands.describe(item_id="The account item ID the customer bought")
 async def restock_command(interaction: discord.Interaction, item_id: str):
     if not interaction.guild:
         await interaction.response.send_message("Use this inside the server.", ephemeral=True)
@@ -1594,7 +1616,7 @@ async def restock_command(interaction: discord.Interaction, item_id: str):
     await interaction.response.defer(ephemeral=True)
     det = await lzt_item_detail(item_id)
     if not det["ok"]:
-        await interaction.followup.send(f"⚠️ LZT.market error: `{det['error']}`", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Stock error: `{det['error']}`", ephemeral=True)
         return
     ticket = interaction.channel if isinstance(interaction.channel, discord.TextChannel) else None
     status = await notify_restock(interaction.user, interaction.guild, det["item"] or {}, ticket)
@@ -1631,14 +1653,14 @@ async def verify_order_command(interaction: discord.Interaction, order_id: str):
     await interaction.followup.send(embed=e, ephemeral=True)
 
 
-@bot.tree.command(name="deliver", description="Manually release an LZT.market account into this ticket.")
+@bot.tree.command(name="deliver", description="Manually release an account into this ticket.")
 @staff_only()
 @app_commands.describe(
-    lzt_item_id="LZT.market item ID to deliver (see /stock)",
+    item_id="Item ID to deliver (see /stock)",
     order_id="Optional SellAuth order ID (for the record / duplicate-protection)",
     product="Optional product label",
 )
-async def deliver_command(interaction: discord.Interaction, lzt_item_id: str,
+async def deliver_command(interaction: discord.Interaction, item_id: str,
                           order_id: str | None = None, product: str | None = None):
     if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
         await interaction.response.send_message("Use this in a ticket channel.", ephemeral=True)
@@ -1660,7 +1682,7 @@ async def deliver_command(interaction: discord.Interaction, lzt_item_id: str,
     await deliver_account(
         channel=interaction.channel,
         owner=owner,
-        lzt_item_id=lzt_item_id,
+        lzt_item_id=item_id,
         product=product or row["verified_product"],
         order_id=order_id or row["verified_order_id"],
         delivered_by=interaction.user.id,
@@ -2141,7 +2163,7 @@ REJECT_DELIVER_CID = "af_reject_deliver"
 
 class ApproveDeliverModal(discord.ui.Modal, title="Approve & Deliver"):
     item_id = discord.ui.TextInput(
-        label="LZT.market item ID to deliver",
+        label="Account item ID to deliver",
         style=discord.TextStyle.short,
         required=True,
         max_length=30,
@@ -2224,7 +2246,7 @@ async def post_delivery_approval(channel: discord.TextChannel, owner: discord.ab
             f"**Buyer:** {owner.mention}\n"
             f"**Product:** {product or 'unspecified'}\n"
             f"**Order ID:** {f'`{order_id}`' if order_id else 'not provided'}\n\n"
-            "Click **Approve & Deliver** and enter the LZT.market item ID to release the account."
+            "Click **Approve & Deliver** and enter the account item ID to release the account."
         ),
         color=AF_BLUE,
     )
@@ -2442,13 +2464,17 @@ async def run_ai_shopping(channel: discord.TextChannel, owner: discord.abc.User)
             f"Try a higher budget, or a staff member can source one for you.")
         return
 
-    embeds = []
-    for it in res["items"]:
+    embeds, files = [], []
+    for i, it in enumerate(res["items"]):
         det = await lzt_item_detail(it.get("item_id") or it.get("id"))
-        embeds.append(market_account_embed(game, det["item"] if det["ok"] else it))
+        embed, file = await build_account_message(game, det["item"] if det["ok"] else it, i)
+        embeds.append(embed)
+        if file:
+            files.append(file)
     await channel.send(
         content=f"Here are the best **{game.title()}** accounts I found within **€{budget:.0f}** 👇",
         embeds=embeds[:10],
+        files=files,
     )
     await channel.send("Let me know which one you'd like, or tell me to adjust the budget. "
                        "A staff member will finalize your purchase.")
