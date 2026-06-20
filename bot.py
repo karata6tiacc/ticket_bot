@@ -1959,10 +1959,11 @@ def make_riot_guide_embed() -> discord.Embed:
     steps = [
         ("1️⃣  Change Name & Username",
          "Update both the **in-game display name** and your **Riot username** in account settings."),
-        ("2️⃣  Link a Google Account",
-         "🔗 **Link a Google account** to the Riot account in your sign-in settings.\n"
-         "Use a **Google account you fully control** — this is what locks the account to you "
-         "and what you'll use to recover it later."),
+        ("2️⃣  Add a Google Account (Required!)",
+         "🔗 **Add a Google account to the Valorant/Riot account** in your sign-in settings.\n"
+         "Use a **Google account you fully control** — this locks the account to you, and it's "
+         "**the proof we require for a replacement**: if anything goes wrong you must show that you "
+         "can **no longer log in** with that Google account."),
         ("3️⃣  Block All Friends",
          "Go through your **friends list** and **block every contact**."),
         ("4️⃣  Wait 2–3 Days",
@@ -1997,9 +1998,15 @@ def make_riot_replacement_embed() -> discord.Embed:
         color=GUIDE_RIOT_COLOR,
     )
     e.add_field(
-        name="📧  Log in with the SAME email",
-        value="Sign in **live on camera** using the **same Google account / email** you linked when "
-              "you first secured the account. Show the email address on screen.",
+        name="🔑  Use the SAME Google account",
+        value="On camera, attempt to sign in using the **exact Google account you added** to the "
+              "Valorant account when you secured it. Show that **Google email on screen** first.",
+        inline=False,
+    )
+    e.add_field(
+        name="🚫  Prove the Google login no longer works",
+        value="The key proof: show that signing in with **that Google account no longer gives you "
+              "access** to the Valorant account — it's been removed / changed and you're **locked out**.",
         inline=False,
     )
     e.add_field(
@@ -2007,12 +2014,6 @@ def make_riot_replacement_embed() -> discord.Embed:
         value="• **No cuts, no edits, no pauses** — a single take.\n"
               "• Record your **full screen** (not a cropped/phone-camera clip).\n"
               "• Show the **current date** on screen (e.g. open a clock/date site).",
-        inline=False,
-    )
-    e.add_field(
-        name="🔓  Show the problem clearly",
-        value="• Attempt the **login** and show the **error / lockout / changed credentials**.\n"
-              "• Show that the account is **not accessible** with the details we delivered.",
         inline=False,
     )
     e.add_field(
