@@ -1256,23 +1256,30 @@ def make_steam_guide_embed() -> discord.Embed:
 
 def make_riot_guide_embed() -> discord.Embed:
     e = discord.Embed(
-        title="⚔️  Riot Games — Account Security Guide",
-        description=f"Follow these steps to properly secure a Riot Games account.\n{DIVIDER}",
+        title="⚔️  Riot Games / Valorant — Account Security Guide",
+        description=f"Follow these steps to properly secure your Riot Games / Valorant account.\n{DIVIDER}",
         color=GUIDE_RIOT_COLOR,
     )
     steps = [
         ("1️⃣  Change Name & Username",
          "Update both the **in-game display name** and your **Riot username** in account settings."),
-        ("2️⃣  Block All Friends",
+        ("2️⃣  Link a Google Account",
+         "🔗 **Link a Google account** to the Riot account in your sign-in settings.\n"
+         "Use a **Google account you fully control** — this is what locks the account to you "
+         "and what you'll use to recover it later."),
+        ("3️⃣  Block All Friends",
          "Go through your **friends list** and **block every contact**."),
-        ("3️⃣  Wait 2–3 Days",
+        ("4️⃣  Wait 2–3 Days",
          "⏳ **Do not change the password yet.** Wait **2–3 days** before doing so."),
-        ("4️⃣  Add 2FA (If Needed for Ranked)",
+        ("5️⃣  Add 2FA (If Needed for Ranked)",
          "Enable **Two-Factor Authentication** if it is required to participate in ranked modes."),
-        ("5️⃣  Check Riot Support — Close Active Tickets",
+        ("6️⃣  Check Riot Support — Close Active Tickets",
          "Visit **Riot Support** and check for **active tickets**.\n"
          "If any are open, reply with:\n"
          "> *\"I have dealt with the problem, you can close, I won't need it for now.\"*"),
+        ("♻️  Need a Replacement Later?",
+         "Always **log in with the same email / Google account** you linked here.\n"
+         "Tap **♻️ Need a replacement?** below to see exactly what to record as proof."),
     ]
     for name, value in steps:
         e.add_field(name=name, value=value, inline=False)
@@ -1280,6 +1287,64 @@ def make_riot_guide_embed() -> discord.Embed:
     e.set_thumbnail(url=logo_ref())
     e.set_footer(text="AF SERVICES | Riot Games Guide")
     return e
+
+
+def make_riot_replacement_embed() -> discord.Embed:
+    """Shown when a buyer taps 'Need a replacement?' — the proof their video must contain."""
+    e = discord.Embed(
+        title="♻️  Riot / Valorant — How to Claim a Replacement",
+        description=(
+            "To receive a replacement you **must** provide **one uncut video** as proof.\n"
+            "Make sure every item below is clearly visible in that single recording.\n"
+            f"{DIVIDER}"
+        ),
+        color=GUIDE_RIOT_COLOR,
+    )
+    e.add_field(
+        name="📧  Log in with the SAME email",
+        value="Sign in **live on camera** using the **same Google account / email** you linked when "
+              "you first secured the account. Show the email address on screen.",
+        inline=False,
+    )
+    e.add_field(
+        name="🎥  One continuous, uncut video",
+        value="• **No cuts, no edits, no pauses** — a single take.\n"
+              "• Record your **full screen** (not a cropped/phone-camera clip).\n"
+              "• Show the **current date** on screen (e.g. open a clock/date site).",
+        inline=False,
+    )
+    e.add_field(
+        name="🔓  Show the problem clearly",
+        value="• Attempt the **login** and show the **error / lockout / changed credentials**.\n"
+              "• Show that the account is **not accessible** with the details we delivered.",
+        inline=False,
+    )
+    e.add_field(
+        name="📨  Submit it",
+        value="Open a **ticket** here and attach the video. Staff will verify and issue your replacement.",
+        inline=False,
+    )
+    e.set_author(name="AF SERVICES • Replacement Policy")
+    e.set_thumbnail(url=logo_ref())
+    e.set_footer(text="AF SERVICES | Riot Games Replacement")
+    return e
+
+
+class RiotGuideView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Need a replacement?",
+        style=discord.ButtonStyle.danger,
+        custom_id="af_riot_replacement",
+        emoji="♻️",
+    )
+    async def replacement_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=make_riot_replacement_embed(),
+            ephemeral=True,
+        )
 
 
 def make_epic_guide_embed() -> discord.Embed:
@@ -1326,11 +1391,15 @@ def make_epic_guide_embed() -> discord.Embed:
 async def guide_command(interaction: discord.Interaction, game: app_commands.Choice[str]):
     if game.value == "steam":
         embed = make_steam_guide_embed()
+        await interaction.response.send_message(embed=embed, files=embed_files())
     elif game.value == "riot_game":
         embed = make_riot_guide_embed()
+        await interaction.response.send_message(
+            embed=embed, view=RiotGuideView(), files=embed_files()
+        )
     else:
         embed = make_epic_guide_embed()
-    await interaction.response.send_message(embed=embed, files=embed_files())
+        await interaction.response.send_message(embed=embed, files=embed_files())
 
 
 # ============================================================
@@ -1964,6 +2033,7 @@ async def on_ready():
 
     bot.add_view(TicketPanelView())
     bot.add_view(CardView())
+    bot.add_view(RiotGuideView())
     bot.add_view(DeliveryApprovalView())
 
     rows = await db_fetch(
