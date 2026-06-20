@@ -214,6 +214,8 @@ ALTER TABLE tickets ADD COLUMN IF NOT EXISTS last_topic_text TEXT NULL;
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS ai_handled BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS verified_order_id TEXT NULL;
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS verified_product TEXT NULL;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reserved_market_item_id BIGINT NULL;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS restock_alerted BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Record of every account released, so a SellAuth order can never be used twice.
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -565,7 +567,7 @@ def market_account_embed(category: str, item: dict) -> discord.Embed:
     return e
 
 
-async def notify_restock(triggered_by: discord.abc.User, guild: discord.Guild,
+async def notify_restock(triggered_by: discord.abc.User | None, guild: discord.Guild,
                          item: dict, ticket: discord.TextChannel | None) -> str:
     """Alert the owner that a sold account must be re-bought on LZT ASAP. Returns a status string."""
     src, resale = _resale_price(item)
@@ -593,11 +595,13 @@ async def notify_restock(triggered_by: discord.abc.User, guild: discord.Guild,
     if isinstance(target, discord.TextChannel):
         await target.send(embed=e)
         return f"Restock alert posted in {target.mention}."
-    try:
-        await triggered_by.send(embed=e)
-        return "Restock alert sent to your DMs."
-    except discord.Forbidden:
-        return "⚠️ Couldn't DM you and no RESTOCK_CHANNEL_ID is set — enable DMs or set the channel."
+    if triggered_by is not None:
+        try:
+            await triggered_by.send(embed=e)
+            return "Restock alert sent to your DMs."
+        except discord.Forbidden:
+            return "⚠️ Couldn't DM you and no RESTOCK_CHANNEL_ID is set — enable DMs or set the channel."
+    return "⚠️ No RESTOCK_CHANNEL_ID set — restock alert could not be delivered."
 
 
 async def lzt_get_credentials(item_id: str | int) -> dict:
@@ -1537,6 +1541,38 @@ async def account_info_command(interaction: discord.Interaction, item_id: str):
     await interaction.followup.send(embed=market_account_embed(category, item))
 
 
+@bot.tree.command(name="reserve",
+                  description="Reserve a market account for this ticket — auto-alerts you to buy it once paid.")
+@staff_only()
+@app_commands.describe(item_id="The LZT.market listing the customer chose")
+async def reserve_command(interaction: discord.Interaction, item_id: str):
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("Use this in a ticket channel.", ephemeral=True)
+        return
+    row = await db_fetchrow("SELECT 1 FROM tickets WHERE channel_id=$1", interaction.channel.id)
+    if not row:
+        await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    det = await lzt_item_detail(item_id)
+    if not det["ok"]:
+        await interaction.followup.send(f"⚠️ LZT.market error: `{det['error']}`", ephemeral=True)
+        return
+    item = det["item"] or {}
+    iid = int(re.sub(r"[^0-9]", "", str(item.get("item_id") or item_id)) or 0)
+    src, resale = _resale_price(item)
+    await db_execute(
+        "UPDATE tickets SET reserved_market_item_id=$1, restock_alerted=FALSE WHERE channel_id=$2",
+        iid, interaction.channel.id,
+    )
+    await interaction.followup.send(
+        f"📌 Reserved listing `{iid}` for this ticket — **{str(item.get('title') or 'Account')[:80]}**\n"
+        f"Cost €{src:.2f} → sells for €{resale:.0f}. "
+        f"You'll get a restock alert automatically once the buyer's payment is verified.",
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="restock",
                   description="Alert yourself to re-buy a sold account on LZT.market ASAP.")
 @staff_only()
@@ -2110,6 +2146,28 @@ async def post_delivery_approval(channel: discord.TextChannel, owner: discord.ab
     content = staff_role.mention if staff_role else None
     await channel.send(content=content, embed=e, view=DeliveryApprovalView())
 
+    # Auto restock alert: if this ticket reserved a market account and payment is verified,
+    # tell us to re-buy that exact listing ASAP (fires once per ticket).
+    if verification and verification.get("paid"):
+        await maybe_fire_restock(channel)
+
+
+async def maybe_fire_restock(channel: discord.TextChannel) -> None:
+    """Fire the restock alert once if the ticket has a reserved, not-yet-alerted market item."""
+    row = await db_fetchrow(
+        "SELECT reserved_market_item_id, restock_alerted FROM tickets WHERE channel_id=$1",
+        channel.id,
+    )
+    if not row or not row["reserved_market_item_id"] or row["restock_alerted"]:
+        return
+    det = await lzt_item_detail(row["reserved_market_item_id"])
+    if not det["ok"]:
+        await channel.send(f"⚠️ Reserved account verified, but I couldn't load it for the "
+                           f"restock alert: `{det['error']}`")
+        return
+    await notify_restock(None, channel.guild, det["item"] or {}, channel)
+    await db_execute("UPDATE tickets SET restock_alerted=TRUE WHERE channel_id=$1", channel.id)
+
 
 # ============================================================
 # AI INTAKE (Claude) — claim tickets
@@ -2463,6 +2521,8 @@ async def on_ready():
     print(f"💳 SellAuth:       {'ON (shop '+SELLAUTH_SHOP_ID+')' if SELLAUTH_ENABLED else 'OFF (set SELLAUTH_API_KEY + SELLAUTH_SHOP_ID)'}")
     print(f"📦 LZT.market:     {'ON' if LZT_ENABLED else 'OFF (set LZT_API_TOKEN)'}{'' if LZT_USER_ID else ' [LZT_USER_ID missing]'}")
     print(f"🚚 Delivery:       {'AUTO' if AUTO_DELIVER else 'staff-approve'} • SellAuth required: {REQUIRE_SELLAUTH}")
+    print(f"🛒 Resale/restock: x{RESALE_MULTIPLIER} markup • restock alerts → "
+          f"{'channel '+str(RESTOCK_CHANNEL_ID) if RESTOCK_CHANNEL_ID else 'DM fallback (set RESTOCK_CHANNEL_ID)'}")
 
 
 bot.run(DISCORD_TOKEN)
