@@ -101,6 +101,16 @@ LZT_CATEGORY_IDS = {
 # Owned-account tag titles on LZT.market that mean "do NOT deliver this".
 LZT_BAD_TAGS = {"invalid", "resold"}
 
+# Customer-facing category -> LZT.market search URL slug (for browsing listings to resell).
+LZT_MARKET_SLUGS = {
+    "valorant": "riot",   # riot category (13) holds Valorant + LoL
+    "fortnite": "fortnite",
+}
+# Resale markup: we sell to the customer at >= this multiple of the LZT source price.
+RESALE_MULTIPLIER = float(os.getenv("RESALE_MULTIPLIER", "2.5") or "2.5")
+# Where "buy this now to restock" alerts go. If unset, the alert DMs the staff who triggered it.
+RESTOCK_CHANNEL_ID = int(os.getenv("RESTOCK_CHANNEL_ID", "0") or "0")
+
 # --- Delivery policy ---
 # You chose "AI gathers + staff approves": payment is verified automatically but a
 # human clicks Approve before any account leaves stock. Set AUTO_DELIVER=1 to skip
@@ -414,6 +424,180 @@ async def lzt_find_valid(category: str, max_pages: int = 10) -> dict:
             break
     out.update(ok=True, items=valid)
     return out
+
+
+# ============================================================
+# LZT.MARKET — BROWSE LISTINGS TO BUY & RESELL (dropshipping)
+# ============================================================
+LZT_SITE = "https://lzt.market"
+
+
+async def _lzt_get(path: str, params: dict | None = None) -> dict:
+    """Raw authenticated GET against the LZT.market API. Returns {ok, data, error}."""
+    out = {"ok": False, "data": None, "error": None}
+    if not LZT_ENABLED:
+        out["error"] = "LZT not configured"
+        return out
+    url = f"{LZT_API_BASE}{path}"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.get(url, headers=_lzt_headers(), params=params or {}) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    out["error"] = f"HTTP {resp.status}: {text[:200]}"
+                    return out
+                out.update(ok=True, data=json.loads(text))
+    except Exception as e:
+        out["error"] = f"request failed: {e}"
+    return out
+
+
+async def lzt_search_market(category: str, budget: float | None = None,
+                            count: int = 3) -> dict:
+    """Search live LZT.market listings we can buy & resell, richest-first within budget.
+    `category` is 'valorant' or 'fortnite'. `budget` is the customer's max spend (EUR);
+    we cap the source price at budget / RESALE_MULTIPLIER. Returns {ok, items, error}."""
+    out = {"ok": False, "items": [], "error": None}
+    slug = LZT_MARKET_SLUGS.get(category.lower())
+    if not slug:
+        out["error"] = f"unknown category '{category}'"
+        return out
+    params: dict = {"order_by": "price_to_down"}  # most expensive (richest) first
+    if budget and budget > 0:
+        params["pmax"] = round(budget / RESALE_MULTIPLIER, 2)
+    res = await _lzt_get(f"/{slug}", params)
+    if not res["ok"]:
+        out["error"] = res["error"]
+        return out
+    items = (res["data"] or {}).get("items") or []
+    out.update(ok=True, items=items[:max(1, min(count, 5))])
+    return out
+
+
+async def lzt_item_detail(item_id: str | int) -> dict:
+    """Full listing detail (skins, image preview links, etc). Returns {ok, item, error}."""
+    iid = re.sub(r"[^0-9]", "", str(item_id or "").strip())
+    if not iid:
+        return {"ok": False, "item": None, "error": "invalid item id"}
+    res = await _lzt_get(f"/{iid}")
+    if not res["ok"]:
+        return {"ok": False, "item": None, "error": res["error"]}
+    data = res["data"] or {}
+    return {"ok": True, "item": data.get("item", data), "error": None}
+
+
+def _resale_price(item: dict) -> tuple[float, float]:
+    """(source_price, resale_price) in EUR, resale rounded up to the next whole euro."""
+    src = float(item.get("price") or 0)
+    resale = src * RESALE_MULTIPLIER
+    resale = float(int(resale) + (1 if resale > int(resale) else 0)) if resale else 0.0
+    return src, resale
+
+
+def _preview_image(item: dict, kind: str) -> str | None:
+    """Direct (JWT-signed, embeddable) composite image URL for skins/weapons, if present."""
+    links = (item.get("imagePreviewLinks") or {}).get("direct") or {}
+    return links.get(kind)
+
+
+_FN_RARITY = {
+    "legendary": "🟠", "epic": "🟣", "rare": "🔵", "uncommon": "🟢",
+    "common": "⚪", "marvel": "🔴", "dc": "🔷", "icon": "🟦", "gaming": "🟦",
+    "starwars": "🟡", "frozen": "🧊", "lava": "🔥", "shadow": "⬛", "slurp": "💧",
+}
+
+
+def market_account_embed(category: str, item: dict) -> discord.Embed:
+    """Customer-facing embed describing one listing: stats + skins image + resale price."""
+    src, resale = _resale_price(item)
+    iid = item.get("item_id") or item.get("id")
+    listing = f"{LZT_SITE}/{iid}/"
+
+    if category.lower() == "valorant":
+        skins = item.get("riot_valorant_skin_count") or 0
+        vp_inv = item.get("riot_valorant_inventory_value") or 0
+        vp_wallet = item.get("riot_valorant_wallet_vp") or 0
+        rank = item.get("valorantRankTitle") or "Unrated"
+        level = item.get("riot_valorant_level") or 0
+        region = item.get("valorantRegionPhrase") or item.get("riot_valorant_region") or "—"
+        agents = item.get("riot_valorant_agent_count") or 0
+        knives = item.get("riot_valorant_knife_count") or 0
+        e = discord.Embed(
+            title=f"🔫  Valorant Account — {skins} Skins",
+            description=f"**Rank:** {rank}  •  **Level:** {level}  •  **Region:** {region}",
+            color=GUIDE_RIOT_COLOR,
+            url=listing,
+        )
+        e.add_field(name="🎨 Skins", value=str(skins), inline=True)
+        e.add_field(name="💎 Skin Value", value=f"{vp_inv:,} VP", inline=True)
+        e.add_field(name="🪙 VP Balance", value=f"{vp_wallet:,} VP", inline=True)
+        e.add_field(name="🧍 Agents", value=str(agents), inline=True)
+        e.add_field(name="🔪 Knives", value=str(knives), inline=True)
+        img = _preview_image(item, "weapons")
+    else:  # fortnite
+        skins = item.get("fortnite_skin_count") or 0
+        vbucks = item.get("fortnite_balance") or 0
+        spent = sum(int(item.get(f"fortnite_shop_{k}_cost") or 0)
+                    for k in ("skins", "pickaxes", "dances", "gliders"))
+        fn_skins = item.get("fortniteSkins") or []
+        names = []
+        for s in fn_skins[:18]:
+            emoji = _FN_RARITY.get(str(s.get("rarity", "")).lower(), "▫️")
+            names.append(f"{emoji} {s.get('title')}")
+        more = len(fn_skins) - len(names)
+        skin_list = "\n".join(names) if names else "—"
+        if more > 0:
+            skin_list += f"\n…and **{more}** more"
+        e = discord.Embed(
+            title=f"🎮  Fortnite Account — {skins} Skins",
+            description=f"**V-Bucks:** {vbucks:,}  •  **V-Bucks spent in shop:** {spent:,}",
+            color=GUIDE_EPIC_COLOR,
+            url=listing,
+        )
+        e.add_field(name="🎨 Skins", value=skin_list[:1024], inline=False)
+        img = _preview_image(item, "skins")
+
+    e.add_field(name="💶 Price", value=f"**€{resale:.0f}**", inline=True)
+    e.add_field(name="🔗 Listing", value=f"[View on market]({listing})", inline=True)
+    if img:
+        e.set_image(url=img)
+    e.set_footer(text="AF SERVICES • Prices include warranty & setup support")
+    return e
+
+
+async def notify_restock(triggered_by: discord.abc.User, guild: discord.Guild,
+                         item: dict, ticket: discord.TextChannel | None) -> str:
+    """Alert the owner that a sold account must be re-bought on LZT ASAP. Returns a status string."""
+    src, resale = _resale_price(item)
+    iid = item.get("item_id") or item.get("id")
+    listing = f"{LZT_SITE}/{iid}/"
+    title = item.get("title") or item.get("title_en") or "Account"
+    e = discord.Embed(
+        title="🛒  RESTOCK NOW — Account Sold",
+        description=(
+            f"A customer paid for this account. **Buy the exact listing below ASAP** before it's gone.\n\n"
+            f"**{str(title)[:200]}**"
+        ),
+        color=0xE74C3C,
+        url=listing,
+    )
+    e.add_field(name="💸 Your cost (LZT)", value=f"€{src:.2f}", inline=True)
+    e.add_field(name="💶 Sold for", value=f"€{resale:.0f}", inline=True)
+    e.add_field(name="🆔 Item ID", value=f"`{iid}`", inline=True)
+    e.add_field(name="🔗 Buy now", value=f"[Open listing]({listing})", inline=False)
+    if ticket:
+        e.add_field(name="🎟️ Ticket", value=ticket.mention, inline=False)
+    e.set_footer(text="AF SERVICES • Restock alert")
+
+    target = guild.get_channel(RESTOCK_CHANNEL_ID) if RESTOCK_CHANNEL_ID else None
+    if isinstance(target, discord.TextChannel):
+        await target.send(embed=e)
+        return f"Restock alert posted in {target.mention}."
+    try:
+        await triggered_by.send(embed=e)
+        return "Restock alert sent to your DMs."
+    except discord.Forbidden:
+        return "⚠️ Couldn't DM you and no RESTOCK_CHANNEL_ID is set — enable DMs or set the channel."
 
 
 async def lzt_get_credentials(item_id: str | int) -> dict:
@@ -1293,6 +1477,82 @@ async def deliver_next_command(interaction: discord.Interaction, category: app_c
         order_id=row["verified_order_id"],
         delivered_by=interaction.user.id,
     )
+
+
+MARKET_CATEGORY_CHOICES = [
+    app_commands.Choice(name="Valorant", value="valorant"),
+    app_commands.Choice(name="Fortnite", value="fortnite"),
+]
+
+
+@bot.tree.command(name="market",
+                  description="Browse Valorant/Fortnite accounts available to buy, within a budget.")
+@app_commands.describe(
+    category="Game the customer wants",
+    budget="Customer's max budget in EUR (optional — we find accounts that fit)",
+    count="How many accounts to show (1-5, default 3)",
+)
+@app_commands.choices(category=MARKET_CATEGORY_CHOICES)
+async def market_command(interaction: discord.Interaction, category: app_commands.Choice[str],
+                         budget: float | None = None, count: int = 3):
+    await interaction.response.defer()
+    res = await lzt_search_market(category.value, budget=budget, count=count)
+    if not res["ok"]:
+        await interaction.followup.send(f"⚠️ LZT.market error: `{res['error']}`", ephemeral=True)
+        return
+    if not res["items"]:
+        await interaction.followup.send(
+            f"No {category.name} accounts found"
+            + (f" under €{budget:.0f}." if budget else "."), ephemeral=True)
+        return
+
+    embeds = []
+    for it in res["items"]:
+        det = await lzt_item_detail(it.get("item_id") or it.get("id"))
+        embeds.append(market_account_embed(category.value, det["item"] if det["ok"] else it))
+
+    header = f"🛍️ **{category.name} accounts available**"
+    if budget:
+        header += f" — within a **€{budget:.0f}** budget"
+    await interaction.followup.send(content=header, embeds=embeds[:10])
+
+
+@bot.tree.command(name="account_info",
+                  description="Show full details (skins, value, price) for one market listing.")
+@app_commands.describe(item_id="LZT.market listing/item ID")
+async def account_info_command(interaction: discord.Interaction, item_id: str):
+    await interaction.response.defer()
+    det = await lzt_item_detail(item_id)
+    if not det["ok"]:
+        await interaction.followup.send(f"⚠️ LZT.market error: `{det['error']}`", ephemeral=True)
+        return
+    item = det["item"] or {}
+    cid = (item.get("category") or {}).get("category_id") or item.get("category_id")
+    category = "valorant" if cid == 13 else "fortnite" if cid == 9 else None
+    if category is None:
+        await interaction.followup.send(
+            "ℹ️ That listing isn't a Valorant or Fortnite account, so I can't render its stats.",
+            ephemeral=True)
+        return
+    await interaction.followup.send(embed=market_account_embed(category, item))
+
+
+@bot.tree.command(name="restock",
+                  description="Alert yourself to re-buy a sold account on LZT.market ASAP.")
+@staff_only()
+@app_commands.describe(item_id="The LZT.market item ID the customer bought")
+async def restock_command(interaction: discord.Interaction, item_id: str):
+    if not interaction.guild:
+        await interaction.response.send_message("Use this inside the server.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    det = await lzt_item_detail(item_id)
+    if not det["ok"]:
+        await interaction.followup.send(f"⚠️ LZT.market error: `{det['error']}`", ephemeral=True)
+        return
+    ticket = interaction.channel if isinstance(interaction.channel, discord.TextChannel) else None
+    status = await notify_restock(interaction.user, interaction.guild, det["item"] or {}, ticket)
+    await interaction.followup.send(f"✅ {status}", ephemeral=True)
 
 
 @bot.tree.command(name="verify_order", description="Check a SellAuth order/invoice and its payment status.")
