@@ -35,7 +35,6 @@ STAFF_ROLE_ID = int(os.getenv("STAFF_ROLE_ID", "0") or "0")
 CLAIM_CATEGORY_ID = int(os.getenv("CLAIM_CATEGORY_ID", "0") or "0")
 CUSTOM_CATEGORY_ID = int(os.getenv("CUSTOM_CATEGORY_ID", "0") or "0")
 SUPPORT_CATEGORY_ID = int(os.getenv("SUPPORT_CATEGORY_ID", "0") or "0")
-BUY_CATEGORY_ID = int(os.getenv("BUY_CATEGORY_ID", "0") or "0")
 
 TICKET_LOG_CHANNEL_ID = int(os.getenv("TICKET_LOG_CHANNEL_ID", "0") or "0")
 
@@ -729,6 +728,13 @@ async def deliver_account(
             le.add_field(name="Released by", value=f"<@{delivered_by}>", inline=False)
         le.add_field(name="Channel", value=channel.mention, inline=False)
         await log_ch.send(embed=le)
+
+    # Confirmed purchase → send the security guide + replacement policy so the buyer
+    # knows how to secure the account and how replacements work.
+    try:
+        await post_purchase_followup(channel, owner, product or creds.get("title"), creds.get("title"))
+    except Exception as e:
+        print("post-purchase guide failed:", e)
     return True
 
 
@@ -749,7 +755,6 @@ def safe_name(name: str) -> str:
 def kind_label(kind: str) -> str:
     return {
         "claim": "Claim Order",
-        "buy": "Buy Account",
         "custom": "Custom Order",
         "support": "Issues/Help",
     }.get(kind, "Support")
@@ -758,7 +763,6 @@ def kind_label(kind: str) -> str:
 def kind_prefix(kind: str) -> str:
     return {
         "claim": "claim",
-        "buy": "buy",
         "custom": "custom",
         "support": "support",
     }.get(kind, "support")
@@ -767,8 +771,7 @@ def kind_prefix(kind: str) -> str:
 def kind_emoji(kind: str) -> str:
     return {
         "claim": "🛒",
-        "buy": "🛍️",
-        "custom": "🧾",
+        "custom": "🛍️",
         "support": "🎫",
     }.get(kind, "🎫")
 
@@ -776,9 +779,6 @@ def kind_emoji(kind: str) -> str:
 def category_for_kind(kind: str) -> int:
     if kind == "claim":
         return CLAIM_CATEGORY_ID
-    if kind == "buy":
-        # Fall back to the claim/support category if a dedicated one isn't set.
-        return BUY_CATEGORY_ID or CLAIM_CATEGORY_ID or SUPPORT_CATEGORY_ID
     if kind == "custom":
         return CUSTOM_CATEGORY_ID
     return SUPPORT_CATEGORY_ID
@@ -1105,8 +1105,7 @@ class TicketPanelSelect(discord.ui.Select):
     def __init__(self):
         options = [
             discord.SelectOption(label="Claim Order", value="claim", description="Claim your order", emoji="🛒"),
-            discord.SelectOption(label="Buy Account", value="buy", description="Browse & buy an account", emoji="🛍️"),
-            discord.SelectOption(label="Custom Order", value="custom", description="Request a custom order", emoji="🧾"),
+            discord.SelectOption(label="Custom Order", value="custom", description="Browse & buy an account", emoji="🛍️"),
             discord.SelectOption(label="Issues/Help", value="support", description="Get help", emoji="🎫"),
         ]
         super().__init__(
@@ -1186,7 +1185,7 @@ class TicketPanelSelect(discord.ui.Select):
 
         bot.add_view(TicketControlView(channel.id), message_id=msg.id)
 
-        if kind == "buy" and AI_ENABLED:
+        if kind == "custom" and AI_ENABLED:
             await channel.send(embed=make_buy_intro_embed())
 
         await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
@@ -1797,6 +1796,83 @@ class RiotGuideView(discord.ui.View):
         )
 
 
+def make_replacement_policy_embed() -> discord.Embed:
+    """Game-agnostic replacement policy, sent to every buyer after a confirmed purchase."""
+    e = discord.Embed(
+        title="♻️  Replacement Policy — Please Read",
+        description=(
+            "If something is wrong with your account, you're covered — here's how it works.\n"
+            f"{DIVIDER}"
+        ),
+        color=0x2ECC71,
+    )
+    e.add_field(
+        name="✅ You qualify for a replacement if",
+        value="The account is **dead on arrival** or stops working before you've changed the "
+              "login details — as long as you followed the security guide.",
+        inline=False,
+    )
+    e.add_field(
+        name="🎥 What you must provide",
+        value="**One uncut video** (no cuts/edits) that:\n"
+              "• Logs in **live** using the **same email / login** we delivered\n"
+              "• Shows the **error or lockout** clearly\n"
+              "• Shows your **full screen** and the **current date**",
+        inline=False,
+    )
+    e.add_field(
+        name="🚫 Not covered",
+        value="Issues caused **after** you changed the email/password without following the guide, "
+              "or claims made without the video proof above.",
+        inline=False,
+    )
+    e.add_field(
+        name="📨 How to claim",
+        value="Open a ticket here with your video and order ID — staff will verify and replace it fast.",
+        inline=False,
+    )
+    e.set_author(name="AF SERVICES • Replacement Policy")
+    e.set_thumbnail(url=logo_ref())
+    e.set_footer(text="AF SERVICES | Warranty & Replacements")
+    return e
+
+
+def detect_game(*texts: str | None) -> str | None:
+    """Best-effort game detection from a product label / account title."""
+    blob = " ".join(t for t in texts if t).lower()
+    if any(k in blob for k in ("valorant", "riot", "league")):
+        return "valorant"
+    if any(k in blob for k in ("fortnite", "epic")):
+        return "fortnite"
+    if "steam" in blob:
+        return "steam"
+    return None
+
+
+async def post_purchase_followup(channel: discord.TextChannel, owner: discord.abc.User,
+                                 product: str | None, title: str | None) -> None:
+    """After a confirmed delivery, send the matching security guide + replacement policy."""
+    game = detect_game(product, title)
+    if game == "valorant":
+        guides = [make_riot_guide_embed()]
+    elif game == "fortnite":
+        guides = [make_epic_guide_embed()]
+    elif game == "steam":
+        guides = [make_steam_guide_embed()]
+    else:
+        guides = []
+    embeds = guides + [make_replacement_policy_embed()]
+
+    view = RiotGuideView() if game == "valorant" else None
+    await channel.send(
+        content=(f"{owner.mention} ✅ **Purchase confirmed!** Please read the security guide and our "
+                 f"replacement policy below — securing the account correctly keeps your warranty valid."),
+        embeds=embeds[:10],
+        view=view,
+        files=embed_files(),
+    )
+
+
 def make_epic_guide_embed() -> discord.Embed:
     e = discord.Embed(
         title="🎯  Epic Games — Account Security Guide",
@@ -2296,7 +2372,7 @@ def make_buy_intro_embed() -> discord.Embed:
 
 AI_SHOP_PROMPT = (
     "You are the shopping assistant for AF SERVICES, a Discord shop that sells gaming accounts. "
-    "You are talking to a customer in a 'Buy Account' ticket who wants to browse and buy. "
+    "You are talking to a customer in a ticket who wants to browse and buy an account. "
     "We ONLY stock two games: Valorant and Fortnite. "
     "Your job: figure out (1) which game they want and (2) their budget in EUR. "
     "If they mention a game we don't carry, politely say we only have Valorant and Fortnite. "
@@ -2538,11 +2614,11 @@ async def on_message(message: discord.Message):
         finally:
             ai_locks.discard(message.channel.id)
 
-    # AI shopping: in open "buy" tickets, help the buyer browse stock until staff claims it.
+    # AI shopping: in open "custom" tickets, help the buyer browse stock until staff claims it.
     if (
         AI_ENABLED
         and row["status"] == "open"
-        and row["kind"] == "buy"
+        and row["kind"] == "custom"
         and row["claimed_by"] is None
         and is_member
         and not author_is_staff
