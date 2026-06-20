@@ -35,6 +35,7 @@ STAFF_ROLE_ID = int(os.getenv("STAFF_ROLE_ID", "0") or "0")
 CLAIM_CATEGORY_ID = int(os.getenv("CLAIM_CATEGORY_ID", "0") or "0")
 CUSTOM_CATEGORY_ID = int(os.getenv("CUSTOM_CATEGORY_ID", "0") or "0")
 SUPPORT_CATEGORY_ID = int(os.getenv("SUPPORT_CATEGORY_ID", "0") or "0")
+BUY_CATEGORY_ID = int(os.getenv("BUY_CATEGORY_ID", "0") or "0")
 
 TICKET_LOG_CHANNEL_ID = int(os.getenv("TICKET_LOG_CHANNEL_ID", "0") or "0")
 
@@ -748,6 +749,7 @@ def safe_name(name: str) -> str:
 def kind_label(kind: str) -> str:
     return {
         "claim": "Claim Order",
+        "buy": "Buy Account",
         "custom": "Custom Order",
         "support": "Issues/Help",
     }.get(kind, "Support")
@@ -756,6 +758,7 @@ def kind_label(kind: str) -> str:
 def kind_prefix(kind: str) -> str:
     return {
         "claim": "claim",
+        "buy": "buy",
         "custom": "custom",
         "support": "support",
     }.get(kind, "support")
@@ -764,6 +767,7 @@ def kind_prefix(kind: str) -> str:
 def kind_emoji(kind: str) -> str:
     return {
         "claim": "🛒",
+        "buy": "🛍️",
         "custom": "🧾",
         "support": "🎫",
     }.get(kind, "🎫")
@@ -772,6 +776,9 @@ def kind_emoji(kind: str) -> str:
 def category_for_kind(kind: str) -> int:
     if kind == "claim":
         return CLAIM_CATEGORY_ID
+    if kind == "buy":
+        # Fall back to the claim/support category if a dedicated one isn't set.
+        return BUY_CATEGORY_ID or CLAIM_CATEGORY_ID or SUPPORT_CATEGORY_ID
     if kind == "custom":
         return CUSTOM_CATEGORY_ID
     return SUPPORT_CATEGORY_ID
@@ -1098,6 +1105,7 @@ class TicketPanelSelect(discord.ui.Select):
     def __init__(self):
         options = [
             discord.SelectOption(label="Claim Order", value="claim", description="Claim your order", emoji="🛒"),
+            discord.SelectOption(label="Buy Account", value="buy", description="Browse & buy an account", emoji="🛍️"),
             discord.SelectOption(label="Custom Order", value="custom", description="Request a custom order", emoji="🧾"),
             discord.SelectOption(label="Issues/Help", value="support", description="Get help", emoji="🎫"),
         ]
@@ -1177,6 +1185,9 @@ class TicketPanelSelect(discord.ui.Select):
         )
 
         bot.add_view(TicketControlView(channel.id), message_id=msg.id)
+
+        if kind == "buy" and AI_ENABLED:
+            await channel.send(embed=make_buy_intro_embed())
 
         await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
 
@@ -2262,6 +2273,112 @@ async def run_ai_intake(channel: discord.TextChannel, owner: discord.abc.User) -
 
 
 # ============================================================
+# AI SHOPPING ASSISTANT — "Buy Account" tickets
+# ============================================================
+def make_buy_intro_embed() -> discord.Embed:
+    e = discord.Embed(
+        title="🛍️  What are you looking for?",
+        description=(
+            "Tell me what you'd like to buy and your **budget**, and I'll pull up matching "
+            "accounts right away.\n\n"
+            "We currently stock **Valorant** and **Fortnite** accounts.\n\n"
+            "**For example:**\n"
+            "> *\"A Valorant account with some skins, around €25\"*\n"
+            "> *\"Fortnite account with OG skins, budget 40 euros\"*\n\n"
+            f"{DIVIDER}\nJust type your request below 👇"
+        ),
+        color=AF_BLUE,
+    )
+    e.set_thumbnail(url=logo_ref())
+    e.set_footer(text="AF SERVICES • Account Shop")
+    return e
+
+
+AI_SHOP_PROMPT = (
+    "You are the shopping assistant for AF SERVICES, a Discord shop that sells gaming accounts. "
+    "You are talking to a customer in a 'Buy Account' ticket who wants to browse and buy. "
+    "We ONLY stock two games: Valorant and Fortnite. "
+    "Your job: figure out (1) which game they want and (2) their budget in EUR. "
+    "If they mention a game we don't carry, politely say we only have Valorant and Fortnite. "
+    "If you don't yet know the game or budget, ask for the missing piece in a warm, brief way, "
+    "and give a quick example of how to phrase it. "
+    "When you have BOTH a game (valorant or fortnite) and a numeric EUR budget, set ready=true — "
+    "the system will then automatically show matching accounts, so your reply should tell them "
+    "you're pulling up options now (do NOT invent account details or prices yourself).\n\n"
+    "Respond with ONLY a JSON object, no prose around it:\n"
+    '{"reply": "<your message>", "game": <"valorant"|"fortnite"|null>, '
+    '"budget": <number|null>, "ready": <true only when you have BOTH game and budget>}'
+)
+
+
+async def run_ai_shopping(channel: discord.TextChannel, owner: discord.abc.User) -> None:
+    if not (AI_ENABLED and anthropic_client):
+        return
+
+    history: list[dict] = []
+    async for m in channel.history(limit=25, oldest_first=True):
+        if not m.content:
+            continue
+        role = "assistant" if (bot.user and m.author.id == bot.user.id) else "user"
+        history.append({"role": role, "content": m.content[:1500]})
+    while history and history[0]["role"] != "user":
+        history.pop(0)
+    if not history:
+        return
+    merged: list[dict] = []
+    for h in history:
+        if merged and merged[-1]["role"] == h["role"]:
+            merged[-1]["content"] += "\n" + h["content"]
+        else:
+            merged.append(dict(h))
+
+    try:
+        resp = await anthropic_client.messages.create(
+            model=AI_MODEL, max_tokens=500, system=AI_SHOP_PROMPT, messages=merged
+        )
+        raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+    except Exception as e:
+        print("AI shopping error:", e)
+        return
+
+    data = _extract_json(raw) or {}
+    reply = data.get("reply") or "What game and budget are you looking for?"
+    await channel.send(reply)
+
+    game = (data.get("game") or "").lower()
+    budget = data.get("budget")
+    try:
+        budget = float(budget) if budget is not None else None
+    except (TypeError, ValueError):
+        budget = None
+    if not (data.get("ready") and game in LZT_MARKET_SLUGS and budget and budget > 0):
+        return
+
+    # Show matching accounts within budget (source price capped at budget / markup).
+    res = await lzt_search_market(game, budget=budget, count=3)
+    if not res["ok"]:
+        await channel.send(f"⚠️ I couldn't reach the stock right now (`{res['error']}`). "
+                           f"A staff member will help you shortly.")
+        return
+    if not res["items"]:
+        await channel.send(
+            f"I couldn't find a {game.title()} account within €{budget:.0f} right now. "
+            f"Try a higher budget, or a staff member can source one for you.")
+        return
+
+    embeds = []
+    for it in res["items"]:
+        det = await lzt_item_detail(it.get("item_id") or it.get("id"))
+        embeds.append(market_account_embed(game, det["item"] if det["ok"] else it))
+    await channel.send(
+        content=f"Here are the best **{game.title()}** accounts I found within **€{budget:.0f}** 👇",
+        embeds=embeds[:10],
+    )
+    await channel.send("Let me know which one you'd like, or tell me to adjust the budget. "
+                       "A staff member will finalize your purchase.")
+
+
+# ============================================================
 # REFRESH CONTROL MESSAGE
 # ============================================================
 async def refresh_ticket_control_message(channel: discord.TextChannel):
@@ -2377,7 +2494,7 @@ async def on_message(message: discord.Message):
         return
 
     row = await db_fetchrow(
-        """SELECT created_at, first_staff_response_seconds, status, kind, owner_id, ai_handled
+        """SELECT created_at, first_staff_response_seconds, status, kind, owner_id, ai_handled, claimed_by
            FROM tickets WHERE channel_id=$1""",
         message.channel.id
     )
@@ -2418,6 +2535,26 @@ async def on_message(message: discord.Message):
                 await run_ai_intake(message.channel, message.author)
         except Exception as e:
             print("AI intake failed:", e)
+        finally:
+            ai_locks.discard(message.channel.id)
+
+    # AI shopping: in open "buy" tickets, help the buyer browse stock until staff claims it.
+    if (
+        AI_ENABLED
+        and row["status"] == "open"
+        and row["kind"] == "buy"
+        and row["claimed_by"] is None
+        and is_member
+        and not author_is_staff
+        and message.author.id == int(row["owner_id"])
+        and message.channel.id not in ai_locks
+    ):
+        ai_locks.add(message.channel.id)
+        try:
+            async with message.channel.typing():
+                await run_ai_shopping(message.channel, message.author)
+        except Exception as e:
+            print("AI shopping failed:", e)
         finally:
             ai_locks.discard(message.channel.id)
 
