@@ -111,6 +111,16 @@ RESALE_MULTIPLIER = float(os.getenv("RESALE_MULTIPLIER", "2.5") or "2.5")
 # Where "buy this now to restock" alerts go. If unset, the alert DMs the staff who triggered it.
 RESTOCK_CHANNEL_ID = int(os.getenv("RESTOCK_CHANNEL_ID", "0") or "0")
 
+# --- NowPayments (crypto checkout for custom orders) ---
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY", "")
+NOWPAYMENTS_API_BASE = os.getenv("NOWPAYMENTS_API_BASE", "https://api.nowpayments.io/v1").rstrip("/")
+NOWPAYMENTS_PRICE_CURRENCY = os.getenv("NOWPAYMENTS_PRICE_CURRENCY", "eur").lower()
+NOWPAYMENTS_ENABLED = bool(NOWPAYMENTS_API_KEY)
+# Coins customers can pay with -> NowPayments pay_currency ticker.
+CRYPTO_CHOICES = {"LTC": "ltc", "SOL": "sol", "BTC": "btc", "ETH": "eth"}
+# NowPayments statuses that mean the customer has paid.
+NP_PAID_STATUSES = {"confirmed", "sending", "finished", "partially_paid"}
+
 # --- Delivery policy ---
 # You chose "AI gathers + staff approves": payment is verified automatically but a
 # human clicks Approve before any account leaves stock. Set AUTO_DELIVER=1 to skip
@@ -216,6 +226,9 @@ ALTER TABLE tickets ADD COLUMN IF NOT EXISTS verified_order_id TEXT NULL;
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS verified_product TEXT NULL;
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reserved_market_item_id BIGINT NULL;
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS restock_alerted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS crypto_payment_id TEXT NULL;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS crypto_amount NUMERIC NULL;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS crypto_paid BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Record of every account released, so a SellAuth order can never be used twice.
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -620,6 +633,74 @@ async def notify_restock(triggered_by: discord.abc.User | None, guild: discord.G
         except discord.Forbidden:
             return "⚠️ Couldn't DM you and no RESTOCK_CHANNEL_ID is set — enable DMs or set the channel."
     return "⚠️ No RESTOCK_CHANNEL_ID set — restock alert could not be delivered."
+
+
+# ============================================================
+# NOWPAYMENTS — crypto checkout (LTC / SOL / BTC / ETH)
+# ============================================================
+def _np_headers() -> dict:
+    return {"x-api-key": NOWPAYMENTS_API_KEY, "Content-Type": "application/json"}
+
+
+async def np_create_payment(amount: float, pay_currency: str, order_id: str,
+                            description: str) -> dict:
+    """Create a NowPayments crypto payment. Returns {ok, payment_id, pay_address,
+    pay_amount, pay_currency, error}."""
+    out = {"ok": False, "payment_id": None, "pay_address": None,
+           "pay_amount": None, "pay_currency": pay_currency, "error": None}
+    if not NOWPAYMENTS_ENABLED:
+        out["error"] = "crypto payments not configured"
+        return out
+    body = {
+        "price_amount": round(float(amount), 2),
+        "price_currency": NOWPAYMENTS_PRICE_CURRENCY,
+        "pay_currency": pay_currency,
+        "order_id": order_id,
+        "order_description": description[:200],
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as s:
+            async with s.post(f"{NOWPAYMENTS_API_BASE}/payment",
+                              headers=_np_headers(), json=body) as r:
+                text = await r.text()
+                if r.status >= 400:
+                    out["error"] = f"HTTP {r.status}: {text[:200]}"
+                    return out
+                data = json.loads(text)
+    except Exception as e:
+        out["error"] = f"request failed: {e}"
+        return out
+    out.update(
+        ok=True,
+        payment_id=str(data.get("payment_id")),
+        pay_address=data.get("pay_address"),
+        pay_amount=data.get("pay_amount"),
+        pay_currency=(data.get("pay_currency") or pay_currency),
+    )
+    return out
+
+
+async def np_get_payment(payment_id: str) -> dict:
+    """Look up a NowPayments payment. Returns {ok, status, paid, error}."""
+    out = {"ok": False, "status": None, "paid": False, "error": None}
+    if not NOWPAYMENTS_ENABLED:
+        out["error"] = "crypto payments not configured"
+        return out
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
+            async with s.get(f"{NOWPAYMENTS_API_BASE}/payment/{payment_id}",
+                             headers=_np_headers()) as r:
+                text = await r.text()
+                if r.status >= 400:
+                    out["error"] = f"HTTP {r.status}: {text[:200]}"
+                    return out
+                data = json.loads(text)
+    except Exception as e:
+        out["error"] = f"request failed: {e}"
+        return out
+    status = str(data.get("payment_status") or "").lower()
+    out.update(ok=True, status=status, paid=status in NP_PAID_STATUSES)
+    return out
 
 
 async def lzt_get_credentials(item_id: str | int) -> dict:
@@ -1621,6 +1702,150 @@ async def restock_command(interaction: discord.Interaction, item_id: str):
     ticket = interaction.channel if isinstance(interaction.channel, discord.TextChannel) else None
     status = await notify_restock(interaction.user, interaction.guild, det["item"] or {}, ticket)
     await interaction.followup.send(f"✅ {status}", ephemeral=True)
+
+
+# ============================================================
+# CRYPTO CHECKOUT VIEWS (NowPayments) — posted into a ticket
+# ============================================================
+class CryptoSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Select a cryptocurrency to pay with…",
+            min_values=1, max_values=1, custom_id="af_crypto_select",
+            options=[discord.SelectOption(label=lbl, value=tk) for lbl, tk in CRYPTO_CHOICES.items()],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        ch = interaction.channel
+        if not isinstance(ch, discord.TextChannel):
+            await interaction.response.send_message("Use this inside the ticket.", ephemeral=True)
+            return
+        row = await db_fetchrow("SELECT crypto_amount FROM tickets WHERE channel_id=$1", ch.id)
+        if not row or row["crypto_amount"] is None:
+            await interaction.response.send_message(
+                "No price is set yet — staff must run `/crypto` first.", ephemeral=True)
+            return
+        amount = float(row["crypto_amount"])
+        coin = self.values[0]
+        await interaction.response.defer()
+        pay = await np_create_payment(amount, coin, order_id=f"ticket-{ch.id}",
+                                      description=f"AF SERVICES order ({ch.name})")
+        if not pay["ok"]:
+            await interaction.followup.send(
+                f"⚠️ Couldn't create the {coin.upper()} payment: `{pay['error']}`", ephemeral=True)
+            return
+        await db_execute(
+            "UPDATE tickets SET crypto_payment_id=$1, crypto_paid=FALSE WHERE channel_id=$2",
+            pay["payment_id"], ch.id)
+        e = discord.Embed(
+            title=f"💎  Send {str(pay['pay_currency']).upper()} to Pay €{amount:.2f}",
+            description=("Send **exactly** the amount below to this address. "
+                         f"Sending less will not confirm.\n{DIVIDER}"),
+            color=AF_BLUE,
+        )
+        e.add_field(name="Amount to send",
+                    value=f"`{pay['pay_amount']} {str(pay['pay_currency']).upper()}`", inline=False)
+        e.add_field(name="Address", value=f"`{pay['pay_address']}`", inline=False)
+        e.set_footer(text="After sending, click ‘I’ve Paid — Check’ below.")
+        await interaction.followup.send(embed=e, view=CryptoCheckView())
+
+
+class CryptoPayView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(CryptoSelect())
+
+
+class CryptoCheckView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="I've Paid — Check", style=discord.ButtonStyle.success,
+                       emoji="✅", custom_id="af_crypto_check")
+    async def check(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ch = interaction.channel
+        if not isinstance(ch, discord.TextChannel):
+            await interaction.response.send_message("Use this inside the ticket.", ephemeral=True)
+            return
+        row = await db_fetchrow(
+            "SELECT crypto_payment_id, crypto_paid, owner_id FROM tickets WHERE channel_id=$1", ch.id)
+        if not row or not row["crypto_payment_id"]:
+            await interaction.response.send_message("No crypto payment is in progress here.", ephemeral=True)
+            return
+        if row["crypto_paid"]:
+            await interaction.response.send_message("✅ This order is already marked paid.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        st = await np_get_payment(row["crypto_payment_id"])
+        if not st["ok"]:
+            await interaction.followup.send(f"⚠️ Couldn't check the payment: `{st['error']}`", ephemeral=True)
+            return
+        if not st["paid"]:
+            await interaction.followup.send(
+                f"⏳ Not confirmed yet (status: `{st['status']}`). Give it a minute and check again.",
+                ephemeral=True)
+            return
+        await db_execute("UPDATE tickets SET crypto_paid=TRUE WHERE channel_id=$1", ch.id)
+        await interaction.followup.send("✅ Payment confirmed — thank you!", ephemeral=True)
+        owner = ch.guild.get_member(int(row["owner_id"])) or await bot.fetch_user(int(row["owner_id"]))
+        staff_role = get_staff_role(ch.guild)
+        await ch.send(
+            content=(staff_role.mention if staff_role else None),
+            embed=discord.Embed(
+                title="✅  Crypto Payment Confirmed",
+                description=f"{owner.mention}'s crypto payment is confirmed. Staff will deliver shortly.",
+                color=0x2ECC71),
+        )
+        await maybe_fire_restock(ch)
+
+
+@bot.tree.command(name="crypto",
+                  description="Post a crypto (LTC/SOL/BTC/ETH) payment option in this ticket.")
+@staff_only()
+@app_commands.describe(amount="Price in EUR (optional — defaults to the reserved account's price)")
+async def crypto_command(interaction: discord.Interaction, amount: float | None = None):
+    if not NOWPAYMENTS_ENABLED:
+        await interaction.response.send_message(
+            "⚠️ Crypto payments aren't configured (set `NOWPAYMENTS_API_KEY`).", ephemeral=True)
+        return
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("Use this in a ticket channel.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    row = await db_fetchrow(
+        "SELECT reserved_market_item_id FROM tickets WHERE channel_id=$1", interaction.channel.id)
+    if not row:
+        await interaction.followup.send("This is not a ticket channel.", ephemeral=True)
+        return
+    price = amount
+    if price is None:
+        if not row["reserved_market_item_id"]:
+            await interaction.followup.send(
+                "No account reserved — run `/reserve` first, or pass an amount: `/crypto 25`.",
+                ephemeral=True)
+            return
+        det = await lzt_item_detail(row["reserved_market_item_id"])
+        if not det["ok"]:
+            await interaction.followup.send(
+                f"⚠️ Couldn't load the reserved account: `{det['error']}`", ephemeral=True)
+            return
+        _, price = _resale_price(det["item"] or {})
+    if not price or price <= 0:
+        await interaction.followup.send("Couldn't determine a price.", ephemeral=True)
+        return
+    await db_execute(
+        "UPDATE tickets SET crypto_amount=$1, crypto_payment_id=NULL, crypto_paid=FALSE WHERE channel_id=$2",
+        price, interaction.channel.id)
+    e = discord.Embed(
+        title="💳  Pay with Crypto",
+        description=(f"**Total: €{price:.2f}**\n\nChoose a coin below to get your payment address.\n"
+                     f"We accept **LTC, SOL, BTC, ETH**.\n{DIVIDER}"),
+        color=AF_BLUE,
+    )
+    e.set_thumbnail(url=logo_ref())
+    e.set_footer(text="AF SERVICES • Crypto Checkout")
+    await interaction.channel.send(embed=e, view=CryptoPayView(), files=embed_files())
+    await interaction.followup.send("✅ Crypto checkout posted.", ephemeral=True)
 
 
 @bot.tree.command(name="verify_order", description="Check a SellAuth order/invoice and its payment status.")
@@ -2735,6 +2960,8 @@ async def on_ready():
     bot.add_view(CardView())
     bot.add_view(RiotGuideView())
     bot.add_view(DeliveryApprovalView())
+    bot.add_view(CryptoPayView())
+    bot.add_view(CryptoCheckView())
 
     rows = await db_fetch(
         "SELECT channel_id, control_message_id FROM tickets WHERE guild_id=$1 AND status='open' AND control_message_id IS NOT NULL",
@@ -2762,6 +2989,7 @@ async def on_ready():
     print(f"🚚 Delivery:       {'AUTO' if AUTO_DELIVER else 'staff-approve'} • SellAuth required: {REQUIRE_SELLAUTH}")
     print(f"🛒 Resale/restock: x{RESALE_MULTIPLIER} markup • restock alerts → "
           f"{'channel '+str(RESTOCK_CHANNEL_ID) if RESTOCK_CHANNEL_ID else 'DM fallback (set RESTOCK_CHANNEL_ID)'}")
+    print(f"💎 Crypto pay:     {'ON ('+NOWPAYMENTS_PRICE_CURRENCY+', LTC/SOL/BTC/ETH)' if NOWPAYMENTS_ENABLED else 'OFF (set NOWPAYMENTS_API_KEY)'}")
 
 
 bot.run(DISCORD_TOKEN)
